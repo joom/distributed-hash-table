@@ -67,28 +67,27 @@ runCommand :: Command -> MutState -> IO Response
 runCommand cmd MutState{..} = do
   R.modifyIORef i (+1)
   i' <- R.readIORef i
-  let i'' = "r" ++ show i'
   case cmd of
     Print s -> do
       putStrLn $ green "Printing:" ++ " " ++ s
-      return $ Executed i'' Ok
+      return $ Executed i' Ok
     Get k -> do
       get <- H.lookup hash k
       case get of
         Just v -> do
           putStrLn $ green $ "Got \"" ++ k ++ "\""
-          return $ GetResponse i'' Ok v
+          return $ GetResponse i' Ok v
         Nothing -> do
           putStrLn $ red $ "Couldn't get \"" ++ k ++ "\""
-          return $ GetResponse i'' NotFound ""
+          return $ GetResponse i' NotFound ""
     Set k v -> do
       H.insert hash k v
       putStrLn $ green $ "Set \"" ++ k ++ "\" to \"" ++ v ++ "\""
-      return $ Executed i'' Ok
+      return $ Executed i' Ok
     QueryAllKeys -> do
       kvs <- H.toList hash
       putStrLn $ green "Returned all keys"
-      return $ KeysResponse i'' Ok (map fst kvs)
+      return $ KeysResponse i' Ok (map fst kvs)
 
 runConn :: (Socket, SockAddr) -> MutState -> IO ()
 runConn (sock, sockAddr) st = do

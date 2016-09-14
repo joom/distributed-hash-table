@@ -24,9 +24,9 @@ instance ToJSON Status where
   toJSON NotFound = String "not_found"
 
 data Response =
-    Executed     { i :: String , status :: Status }
-  | GetResponse  { i :: String , status :: Status , value :: String }
-  | KeysResponse { i :: String , status :: Status , keys :: [String] }
+    Executed     { i :: Int , status :: Status }
+  | GetResponse  { i :: Int , status :: Status , value :: String }
+  | KeysResponse { i :: Int , status :: Status , keys :: [String] }
   deriving (Show, Eq, Generic)
 
 instance ToJSON Response
