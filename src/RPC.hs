@@ -1,12 +1,9 @@
 {-# LANGUAGE DeriveGeneric, DefaultSignatures, OverloadedStrings #-}
-module RPC.Language where
+module RPC where
 
 import Data.Aeson
 import Data.Serialize
 import GHC.Generics
-
-msgLenBytes :: Int
-msgLenBytes = 8
 
 data Command =
     Print String
@@ -27,12 +24,15 @@ instance ToJSON Status where
   toJSON NotFound = String "not_found"
 
 data Response =
-    Executed     { status :: Status }
-  | GetResponse  { status :: Status , value :: String }
-  | KeysResponse { status :: Status , keys :: [String] }
+    Executed     { i :: String , status :: Status }
+  | GetResponse  { i :: String , status :: Status , value :: String }
+  | KeysResponse { i :: String , status :: Status , keys :: [String] }
   deriving (Show, Eq, Generic)
 
 instance ToJSON Response
+
+msgLenBytes :: Int
+msgLenBytes = 8
 
 -- | Convert an Int to a String for a given number of max bytes.
 intWithCompleteBytes :: Int -- ^ Int that we want to return

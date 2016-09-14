@@ -13,7 +13,7 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     RPC.Language
+  exposed-modules:     RPC
   build-depends:       base >= 4.7 && < 5
                      , cereal >= 0.5 && < 0.6
                      , aeson >= 0.11

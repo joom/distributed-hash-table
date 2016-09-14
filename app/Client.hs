@@ -11,14 +11,14 @@ import Network.Socket.ByteString
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Serialize as S
 import System.Console.Chalk
+import System.Timeout
 import System.Exit
 
-import RPC.Language
+import RPC
 
 data Options = Options
   { server :: HostName
-  , cmd    :: Command
-  }
+  , cmd    :: Command }
 
 getSocket :: HostName -> ServiceName -> IO (Socket, SockAddr)
 getSocket host serv = do
@@ -30,19 +30,23 @@ getSocket host serv = do
 -- | Tries to connect to a port from 38000 to 38010.
 -- Returns Nothing if they all fail. Has side effect of printing log messages.
 findAndConnectOpenPort :: HostName -> IO (Maybe (Socket, SockAddr))
-findAndConnectOpenPort host = foldM (\success port -> do
+findAndConnectOpenPort host = foldM (\success port ->
     case success of
       Just _ -> return success -- we already have a successful connection, don't try
       _ -> do
         (sock, sockAddr) <- getSocket host (show port)
-        either <- try $ connect sock sockAddr
-        case (either :: Either IOException ()) of
-          Left e -> do
+        attempt <- timeout 5000000 (try (connect sock sockAddr))
+        case (attempt :: Maybe (Either IOException ())) of
+          Nothing -> do
+            close sock
+            putStrLn $ red ("Timeout error with socket to " ++ host ++ ":" ++ show port)
+            return Nothing
+          Just (Left e) -> do
             close sock
             putStrLn $ red ("Couldn't connect to " ++ host ++ ":" ++ show port)
                     ++ " because " ++ show e
             return Nothing
-          Right () -> do
+          Just (Right ()) -> do
             putStrLn $ green ("Connected to " ++ host ++ ":" ++ show port)
             return $ Just (sock, sockAddr)
   ) Nothing [38000..38010]
