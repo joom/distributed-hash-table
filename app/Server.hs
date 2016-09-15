@@ -45,7 +45,7 @@ findAndListenOpenPort = foldM (\success port ->
       Just _ -> return success -- we already have a successful connection, don't try
       _ -> do
         (sock, sockAddr) <- getSocket (show port)
-        attempt <- timeout 5000000 (try (bind sock sockAddr))
+        attempt <- timeout 10000000 (try (bind sock sockAddr))
         case (attempt :: Maybe (Either IOException ())) of
           Nothing -> do
             close sock
