@@ -17,23 +17,23 @@ Running the client is a bit more complicated, there are 4 kinds of procedures yo
 ```
 ~$ rpc-client print "side effects yay!"
 Connected to localhost:38000
-{"status":"ok","tag":"Executed","i":"r1"}
+{"status":"ok","tag":"Executed","i":1}
 
 ~$ rpc-client set "lang" "русски"
 Connected to localhost:38000
-{"status":"ok","tag":"Executed","i":"r2"}
+{"status":"ok","tag":"Executed","i":2}
 
 ~$ rpc-client get "lang"
 Connected to localhost:38000
-{"status":"ok","tag":"GetResponse","value":"русски","i":"r3"}
+{"status":"ok","tag":"GetResponse","value":"русски","i":3}
 
 ~$ rpc-client get "timezone"
 Connected to localhost:38000
-{"status":"not_found","tag":"GetResponse","value":"","i":"r4"}
+{"status":"not_found","tag":"GetResponse","value":"","i":4}
 
 ~$ rpc-client query_all_keys
 Connected to localhost:38000
-{"status":"ok","tag":"KeysResponse","keys":["lang"],"i":"r5"}
+{"status":"ok","tag":"KeysResponse","keys":["lang"],"i":5}
 ```
 
 You can ignore the `tag` field in the response, but it is kept for now since it will make the `FromJSON Response` instance easier later.
