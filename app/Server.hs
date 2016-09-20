@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards, LambdaCase #-}
 module Server where
 
 import Control.Monad
@@ -20,16 +20,16 @@ import RPC
 
 type HashTable = H.BasicHashTable String String
 
+-- | A type for mutable state.
 data MutState = MutState
-  { hash :: HashTable
-  , i    :: R.IORef Int }
+  { hash :: HashTable }
 
 initialState :: IO MutState
 initialState = do
     hash <- H.new
-    i <- R.newIORef 0
-    return $ MutState hash i
+    return $ MutState hash
 
+-- | Starts a server socket with the given port.
 getSocket :: ServiceName -> IO (Socket, SockAddr)
 getSocket serv = do
     addrInfos <- getAddrInfo
@@ -39,72 +39,76 @@ getSocket serv = do
     sock <- socket (addrFamily serverAddr) Stream defaultProtocol
     return (sock, addrAddress serverAddr)
 
+-- | Tries to listen to a port from 38000 to 38010.
+-- Returns Nothing if they all fail. Has side effect of printing log messages.
 findAndListenOpenPort :: IO (Maybe (Socket, SockAddr))
 findAndListenOpenPort = foldM (\success port ->
     case success of
-      Just _ -> return success -- we already have a successful connection, don't try
+      Just _ -> return success -- we already have a successful conn, don't try
       _ -> do
         (sock, sockAddr) <- getSocket (show port)
-        attempt <- timeout 10000000 (try (bind sock sockAddr))
+        attempt <- timeout timeoutTime (try (bind sock sockAddr))
         case (attempt :: Maybe (Either IOException ())) of
           Nothing -> do
             close sock
-            putStrLn $ red ("Timeout error with binding the port " ++ show port)
+            putStrLn $ red $ "Timeout error when binding port " ++ show port
             return Nothing
           Just (Left e) -> do
             close sock
-            putStrLn $ red ("Couldn't bind the port " ++ show port)
-                    ++ " because " ++ show e
+            putStrLn $ red $ "Couldn't bind port "
+                          ++ show port ++ " because " ++ show e
             return Nothing
           Just (Right ()) -> do
             listen sock 1
-            putStrLn $ green ("Listening to " ++ show port)
+            putStrLn $ green $ "Listening to " ++ show port
             return $ Just (sock, sockAddr)
   ) Nothing [38000..38010]
 
-
-runCommand :: Command -> MutState -> IO Response
-runCommand cmd MutState{..} = do
-  R.modifyIORef i (+1)
-  i' <- R.readIORef i
+-- | Runs the command with side effects and returns the response that is to be
+-- sent back to the client.
+runCommand :: (Int, Command) -- ^ A pair of the request ID and a command.
+           -> MutState -- ^ A reference to the mutable state.
+           -> IO Response
+runCommand (i, cmd) MutState{..} =
   case cmd of
     Print s -> do
       putStrLn $ green "Printing:" ++ " " ++ s
-      return $ Executed i' Ok
+      return $ Executed i Ok
     Get k -> do
       get <- H.lookup hash k
       case get of
         Just v -> do
           putStrLn $ green $ "Got \"" ++ k ++ "\""
-          return $ GetResponse i' Ok v
+          return $ GetResponse i Ok v
         Nothing -> do
           putStrLn $ red $ "Couldn't get \"" ++ k ++ "\""
-          return $ GetResponse i' NotFound ""
+          return $ GetResponse i NotFound ""
     Set k v -> do
       H.insert hash k v
       putStrLn $ green $ "Set \"" ++ k ++ "\" to \"" ++ v ++ "\""
-      return $ Executed i' Ok
+      return $ Executed i Ok
     QueryAllKeys -> do
       kvs <- H.toList hash
       putStrLn $ green "Returned all keys"
-      return $ KeysResponse i' Ok (map fst kvs)
+      return $ KeysResponse i Ok (map fst kvs)
 
+-- | Receives messages, decodes and runs the content if necessary, and returns
+-- the response. Should be run after you accepted a connection.
 runConn :: (Socket, SockAddr) -> MutState -> IO ()
 runConn (sock, sockAddr) st = do
-  lenStr <- recv sock msgLenBytes
-  let lenInt = read (B.unpack lenStr) :: Int
-  cmdMsg <- recv sock lenInt
-  case S.decode cmdMsg :: Either String Command of
-    Left e ->
-     putStrLn $ red "Couldn't parse the command received from the client because " ++ e
-    Right cmd -> do
-      response <- runCommand cmd st
-      let msg = JSON.encode response
-      let len = fromIntegral $ BL.length msg
-      sendAll sock (B.pack (intWithCompleteBytes len msgLenBytes))
-      sendAll sock (BL.toStrict msg)
+  timeoutAct (recvWithLen sock) (putStrLn $ red "Timeout when receiving") $
+    \cmdMsg -> case S.decode cmdMsg :: Either String (Int, Command) of
+      Left e ->
+        putStrLn $ red "Couldn't parse the message received because " ++ e
+      Right (i, cmd) -> do
+        response <- runCommand (i, cmd) st
+        timeoutAct (sendWithLen sock (BL.toStrict (JSON.encode response)))
+                   (putStrLn $ red "Timeout when sending")
+                   return
   close sock
 
+-- | The main loop that keeps accepting more connections.
+-- Should be revised for concurrency.
 loop :: Socket -> MutState -> IO ()
 loop sock st = do
   conn <- accept sock
