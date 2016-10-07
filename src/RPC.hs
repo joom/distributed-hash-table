@@ -56,13 +56,26 @@ intWithCompleteBytes n bytes = let s = show n in
 
 -- Abstractions to deal with sockets and sending the length first.
 
+-- | @'Network.Socket'@ doesn't provide a way to pass the 'MSG_WAITALL' flag to
+-- recv, which means that recv (and its variants) may return less than the
+-- requested number of bytes. The correct behavior in this case is to
+-- repeatedly call 'recv' until the total number of returned bytes is equal to
+-- that expected.
+safeRecv :: Socket -> Int -> IO B.ByteString
+safeRecv sock i = do
+  s <- recv sock i
+  let len = B.length s
+  if len < i
+    then B.append s <$> safeRecv sock (i - len)
+    else return s
+
 -- | First receives the length of the content it will later receive,
 -- then receives the content itself using that length.
 recvWithLen :: Socket -> IO B.ByteString
 recvWithLen sock = do
-  lenStr <- recv sock msgLenBytes
-  let lenInt = read (B.unpack lenStr) :: Int
-  recv sock lenInt
+    lenStr <- safeRecv sock msgLenBytes
+    let lenInt = read (B.unpack lenStr) :: Int
+    safeRecv sock lenInt
 
 -- | First sends the length of the content, then sends the content itself.
 sendWithLen :: Socket -> B.ByteString -> IO ()
