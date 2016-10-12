@@ -2,33 +2,66 @@
 module RPC where
 
 import Data.Aeson
+import qualified Data.UUID
 import Data.Serialize
 import GHC.Generics
 import Network.Socket hiding (recv)
 import Network.Socket.ByteString (recv, sendAll)
 import qualified Data.ByteString.Char8 as B
 import System.Timeout
+import System.Random
 import System.Exit
+
+import Control.Concurrent
+import Control.Exception
+import Control.Monad
 
 -- Data types and typeclass instances
 
-data Command =
+type UUIDString = String
+
+data ServerCommand =
     Print String
   | Get String
   | Set String String
   | QueryAllKeys
   deriving (Show, Eq, Generic)
 
-instance Serialize Command
+instance Serialize ServerCommand
+
+data ViewLeaderCommand =
+    Heartbeat UUIDString ServiceName -- ^ Takes the server's UUID and port.
+  | QueryServers
+  | LockGet String UUIDString -- ^ Takes a lock name and a requester UUID.
+  | LockRelease String UUIDString -- ^ Takes a lock name and a requester UUID.
+  deriving (Show, Eq, Generic)
+
+instance Serialize ViewLeaderCommand
 
 data Status =
     Ok
   | NotFound
+  | Retry
+  | Granted
+  | Forbidden
   deriving (Show, Eq)
 
 instance ToJSON Status where
-  toJSON Ok = String "ok"
-  toJSON NotFound = String "not_found"
+  toJSON st = String $ case st of
+    Ok        -> "ok"
+    NotFound  -> "not_found"
+    Retry     -> "retry"
+    Granted   -> "granted"
+    Forbidden -> "forbidden"
+
+instance FromJSON Status where
+  parseJSON s = case s of
+    String "ok"        -> pure Ok
+    String "not_found" -> pure NotFound
+    String "retry"     -> pure Retry
+    String "granted"   -> pure Granted
+    String "forbidden" -> pure Forbidden
+    _                  -> mempty
 
 data Response =
     Executed     { i :: Int , status :: Status }
@@ -37,6 +70,10 @@ data Response =
   deriving (Show, Eq, Generic)
 
 instance ToJSON Response
+instance FromJSON Response
+
+newUUID :: IO UUIDString
+newUUID = Data.UUID.toString <$> randomIO
 
 -- Message length values and functions
 
@@ -54,39 +91,22 @@ intWithCompleteBytes :: Int -- ^ Int that we want to return
 intWithCompleteBytes n bytes = let s = show n in
   if length s < bytes then replicate (bytes - length s) '0' ++ s else s
 
--- Abstractions to deal with sockets and sending the length first.
+-- Timeout and interval IO
 
--- | @'Network.Socket'@ doesn't provide a way to pass the 'MSG_WAITALL' flag to
--- recv, which means that recv (and its variants) may return less than the
--- requested number of bytes. The correct behavior in this case is to
--- repeatedly call 'recv' until the total number of returned bytes is equal to
--- that expected.
-safeRecv :: Socket -> Int -> IO B.ByteString
-safeRecv sock i = do
-  s <- recv sock i
-  let len = B.length s
-  if len < i
-    then B.append s <$> safeRecv sock (i - len)
-    else return s
+-- | Forks a thread to loop an action with given the given waiting period.
+setInterval :: IO Bool -- ^ Action to perform. Loop continues if it's True.
+            -> Int -- ^ Wait between repetitions in microseconds.
+            -> IO ()
+setInterval action microsecs = do
+    forkIO loop
+    return ()
+  where
+    loop = do
+      threadDelay microsecs
+      b <- action
+      when b loop
 
--- | First receives the length of the content it will later receive,
--- then receives the content itself using that length.
-recvWithLen :: Socket -> IO B.ByteString
-recvWithLen sock = do
-    lenStr <- safeRecv sock msgLenBytes
-    let lenInt = read (B.unpack lenStr) :: Int
-    safeRecv sock lenInt
-
--- | First sends the length of the content, then sends the content itself.
-sendWithLen :: Socket -> B.ByteString -> IO ()
-sendWithLen sock msg = do
-    let len = B.length msg
-    sendAll sock (B.pack (intWithCompleteBytes len msgLenBytes))
-    sendAll sock msg
-
--- Timeout IO
-
--- | Standardization of timeout limits.
+-- | Standardization of timeout limits in microseconds.
 timeoutTime :: Int
 timeoutTime = 10000000 -- 10 seconds
 
