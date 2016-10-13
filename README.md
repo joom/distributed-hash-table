@@ -1,12 +1,12 @@
 # rpc
 
-A simple remote procedure call implementation.
+A remote procedure call implementation with locks and a view leader.
 
 ## Installation
 
 Make sure you have [Stack](http://haskellstack.org) installed.
 
-Clone the repository and run `stack install`. The executable files `rpc-client` and `rpc-server` must now be `~/.local/bin`, which is probably in your path variable.
+Clone the repository and run `stack install`. The executable files `rpc-client`, `rpc-server`, `rpc-view-leader` must now be `~/.local/bin`, which is probably in your path variable.
 
 ## Usage
 
@@ -36,7 +36,7 @@ Connected to localhost:38000
 {"status":"ok","tag":"KeysResponse","keys":["lang"],"i":1}
 ```
 
-You can ignore the `tag` field in the response, but it is kept for now since it will make the `FromJSON Response` instance easier later.
+You can ignore the `tag` field in the response, but it is kept for now since it makes the `FromJSON Response` instance easier.
 
 The executable `rpc-client` also takes an optional argument `--server` (or `-s`) that specifies which host to connect, such a call would be of the form
 

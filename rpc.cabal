@@ -1,6 +1,6 @@
 name:                rpc
 version:             0.2.0.0
-synopsis:            A simple remote procedure call implementation.
+synopsis:            A remote procedure call implementation with locks and a view leader.
 description:         Please see README.md
 homepage:            https://github.com/joom/rpc
 license:             MIT
@@ -71,6 +71,7 @@ executable rpc-view-leader
                      , aeson >= 0.11
                      , stm >= 2.4
                      , stm-containers >= 0.2
+                     , list-t
                      , unix-time >= 0.3
   default-language:    Haskell2010
 

@@ -17,9 +17,15 @@ import qualified Data.Aeson as JSON
 import System.Console.Chalk
 import System.Timeout
 import System.Exit
+import qualified Options.Applicative as A
+import Options.Applicative (Parser, (<>))
 
 import RPC
 import RPC.Socket
+
+data Options = Options
+  { viewLeaderAddr :: HostName
+  } deriving (Show)
 
 -- | A type for mutable state.
 data MutState = MutState
@@ -71,17 +77,21 @@ runConn (sock, sockAddr) st = do
                    return
   close sock
 
-sendHeartbeat :: HostName -> UUIDString -> IO ()
-sendHeartbeat server uuid = do
-  attempt <- findAndConnectOpenPort undefined $ map show [39000..39010]
+sendHeartbeat :: Options
+              -> SockAddr -- ^ The socket address of the listening server.
+              -> UUIDString
+              -> IO ()
+sendHeartbeat Options{..} sockAddr uuid = do
+  attempt <- findAndConnectOpenPort viewLeaderAddr $ map show [39000..39010]
   case attempt of
     Nothing ->
-      die $ bgRed $ "Heartbeat: Couldn't connect to ports 39000 to 39010 on " ++ server
+      die $ bgRed $ "Heartbeat: Couldn't connect to ports 39000 to 39010 on " ++ viewLeaderAddr
     Just (sock, sockAddr) -> do
       timeoutDie
-        (sendWithLen sock (S.encode (Heartbeat undefined undefined)))
-        (red "Timeout error when sending")
-      r <- timeoutDie (recvWithLen sock) (red "Timeout error when receiving")
+        (sendWithLen sock (S.encode (Heartbeat uuid (show sockAddr))))
+        (red "Timeout error when sending heartbeat request")
+      r <- timeoutDie (recvWithLen sock)
+            (red "Timeout error when receiving heartbeat response")
       close sock
       case JSON.decode (BL.fromStrict r) of
         Nothing -> do
@@ -94,21 +104,38 @@ sendHeartbeat server uuid = do
           exitFailure
 
 -- | The main loop that keeps accepting more connections.
--- Should be revised for concurrency.
 loop :: Socket -> MutState -> IO ()
 loop sock st = do
   conn <- accept sock
   forkIO (runConn conn st)
   loop sock st
 
-main :: IO ()
-main = do
+run :: Options -> IO ()
+run opt = do
     uuid <- newUUID
     attempt <- findAndListenOpenPort $ map show [38000..38010]
     case attempt of
       Nothing -> die $ bgRed "Couldn't bind ports 38000 to 38010"
       Just (sock, sockAddr) -> do
-        setInterval (sendHeartbeat undefined uuid >> pure True) 5000000 -- every 5 sec
+        setInterval (sendHeartbeat opt sockAddr uuid >> pure True) 5000000 -- every 5 sec
         st <- initialState
         loop sock st
         close sock
+
+-- | Parser for the optional parameters of the client.
+optionsParser :: Parser Options
+optionsParser = Options
+  <$> A.strOption
+      ( A.long "viewleader"
+     <> A.short 'l'
+     <> A.metavar "VIEWLEADERADDR"
+     <> A.help "Address of the view leader to connect"
+     <> A.value "localhost" )
+
+main :: IO ()
+main = A.execParser opts >>= run
+  where
+    opts = A.info (A.helper <*> optionsParser)
+      ( A.fullDesc
+     <> A.progDesc "Connect to the server at HOST with the given command"
+     <> A.header "client for an RPC implementation with locks and a view leader" )

@@ -4,7 +4,9 @@ module ViewLeader where
 import Control.Concurrent
 import Control.Monad
 import Control.Monad.STM
+import Control.Concurrent.STM.TVar
 import qualified STMContainers.Map as M
+import qualified ListT
 import Control.Exception
 import Data.UnixTime
 import Network.Socket hiding (recv)
@@ -21,38 +23,59 @@ import System.Exit
 import RPC
 import RPC.Socket
 
+data ServerCondition = ServerCondition
+  { lastHeartbeatTime :: UnixTime
+  , isActive          :: Bool
+  , serverAddr        :: SockAddr
+  }
+
 -- | A type for mutable state.
 data MutState = MutState
-  { heartbeats :: M.Map UUIDString UnixTime
-  , locks      :: M.Map String UUIDString
+  { -- ^ Heartbeats are held in a map. When we don't receive a heartbeat
+    -- for 30 sec, then that heartbeat
+    heartbeats :: M.Map UUIDString ServerCondition
+  , epoch      :: TVar Int
+  -- ^ A lock will hold the lock name and an identifier that server calls itself.
+  -- This is different from the UUIDString values we hold, they are arbitrary.
+  -- If a key exists in the map, then there's a lock on that lock name.
+  -- To delete a lock, you have to delete the key from the map.
+  , locks      :: M.Map String String
   }
 
 initialState :: IO MutState
-initialState = MutState <$> M.newIO <*> M.newIO
+initialState = MutState <$> M.newIO <*> newTVarIO 0 <*> M.newIO
 
 -- | Runs the command with side effects and returns the response that is to be
 -- sent back to the client.
 runCommand :: (Int, ViewLeaderCommand) -- ^ A pair of the request ID and a command.
            -> MutState -- ^ A reference to the mutable state.
+           -> SockAddr -- ^ Socket address of the client making the request.
            -> IO Response
-runCommand (i, cmd) MutState{..} =
+runCommand (i, cmd) MutState{..} sockAddr =
   case cmd of
     Heartbeat uuid port -> do
       now <- getUnixTime
       atomically $ do
         get <- M.lookup uuid heartbeats
         case get of
-          Just lastHeartbeatTime -> do
+          Just cond@ServerCondition{..} -> do
             let expireTime = lastHeartbeatTime `addUnixDiffTime` secondsToUnixDiffTime 30
-            if now < expireTime
-              then do
-                M.insert now uuid heartbeats
+            if isActive && (now < expireTime)
+              then do -- Normal heartbeat update
+                M.insert (cond {lastHeartbeatTime = now}) uuid heartbeats
                 return $ Executed i Ok
-              else return $ Executed i Forbidden
-          Nothing -> do
-            M.insert now uuid heartbeats
+              else do -- Expired server connection
+                M.insert (cond {isActive = False}) uuid heartbeats
+                modifyTVar' epoch (+1)
+                return $ Executed i Forbidden
+          Nothing -> do -- New server connection
+            M.insert (ServerCondition now True sockAddr) uuid heartbeats
+            modifyTVar' epoch (+1)
             return $ Executed i Ok
-    QueryServers -> undefined
+    QueryServers -> atomically $ do
+      addrs <- map (show . serverAddr . snd) <$> ListT.toList (M.stream heartbeats)
+      epoch' <- readTVar epoch
+      return $ QueryServersResponse i epoch' addrs
     LockGet name cli -> atomically $ do
       get <- M.lookup name locks
       case get of
@@ -63,8 +86,8 @@ runCommand (i, cmd) MutState{..} =
     LockRelease name cli -> atomically $ do
       get <- M.lookup name locks
       case get of
-        Just uuid ->
-          if uuid == cli
+        Just cliInMap ->
+          if cliInMap == cli
           then do
             M.delete name locks
             return $ Executed i Ok
@@ -81,7 +104,7 @@ runConn (sock, sockAddr) st = do
       Left e ->
         putStrLn $ red "Couldn't parse the message received because " ++ e
       Right (i, cmd) -> do
-        response <- runCommand (i, cmd) st
+        response <- runCommand (i, cmd) st sockAddr
         timeoutAct (sendWithLen sock (BL.toStrict (JSON.encode response)))
                    (putStrLn $ red "Timeout when sending")
                    return

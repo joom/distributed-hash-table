@@ -64,9 +64,10 @@ instance FromJSON Status where
     _                  -> mempty
 
 data Response =
-    Executed     { i :: Int , status :: Status }
-  | GetResponse  { i :: Int , status :: Status , value :: String }
-  | KeysResponse { i :: Int , status :: Status , keys :: [String] }
+    Executed             { i :: Int , status :: Status }
+  | GetResponse          { i :: Int , status :: Status , value :: String }
+  | KeysResponse         { i :: Int , status :: Status , keys :: [String] }
+  | QueryServersResponse { i :: Int , epoch  :: Int    , result :: [String] }
   deriving (Show, Eq, Generic)
 
 instance ToJSON Response
@@ -85,6 +86,7 @@ msgLenBytes = 8
 -- | Convert an Int to a String for a given number of max bytes. The max number
 -- of bytes should be greater than or equal to the number of digits in the
 -- initial Int.
+-- This is kind of hacky, it should be replaced with Data.Binary.
 intWithCompleteBytes :: Int -- ^ Int that we want to return
                      -> Int -- ^ How many bytes we want to have in the string
                      -> String

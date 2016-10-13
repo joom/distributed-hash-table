@@ -2,6 +2,7 @@
 
 module Client where
 
+import Control.Concurrent (threadDelay)
 import Control.Monad
 import Control.Exception
 import qualified Options.Applicative as A
@@ -9,7 +10,9 @@ import Options.Applicative (Parser, (<>))
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
 import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Lazy.Char8 as BL
 import qualified Data.Serialize as S
+import qualified Data.Aeson as JSON
 import System.Console.Chalk
 import System.Timeout
 import System.Exit
@@ -23,19 +26,20 @@ data CommandTypes =
   deriving (Show)
 
 data Options = Options
-  { server :: HostName
-  , cmd    :: CommandTypes
+  { serverAddr     :: HostName
+  , viewLeaderAddr :: HostName
+  , cmd            :: CommandTypes
   } deriving (Show)
 
 -- | Runs the program once it receives a successful parse of the input given.
 run :: Options -> IO ()
-run Options{..} = do
-  let commandPorts = case cmd of {ServerCmd _ -> [38000..38010] ; ViewCmd _ -> [39000..39010]}
-
-  attempt <- findAndConnectOpenPort server $ map show commandPorts
+run opt@Options{..} = do
+  let commandPorts = map show $ case cmd of {ServerCmd _ -> [38000..38010] ; ViewCmd _ -> [39000..39010]}
+  let addr = case cmd of {ServerCmd _ -> serverAddr ; ViewCmd _ -> viewLeaderAddr}
+  attempt <- findAndConnectOpenPort addr commandPorts
   case attempt of
     Nothing ->
-      die $ bgRed $ "Couldn't connect to ports 38000 to 38010 on " ++ server
+      die $ bgRed $ "Couldn't connect to ports " ++ head commandPorts ++ " to " ++ last commandPorts ++ " on " ++ addr
     Just (sock, sockAddr) -> do
       let i = 1 :: Int -- 1 is the request ID
       let encoded = case cmd of {ServerCmd c -> S.encode (i, c) ; ViewCmd c -> S.encode (i, c)}
@@ -43,9 +47,14 @@ run Options{..} = do
         (sendWithLen sock encoded)
         (red "Timeout error when sending")
       r <- timeoutDie (recvWithLen sock) (red "Timeout error when receiving")
-      close sock
-      B.putStrLn r
-      exitSuccess
+      case JSON.decode (BL.fromStrict r) :: Maybe Response of
+        Just (Executed _ Retry) -> do
+          threadDelay 5000000 -- wait 5 sec
+          run opt
+        _ -> do
+          close sock
+          B.putStrLn r
+          exitSuccess
 
 -- | Parser for a ServerCommand, i.e. the procedures available in our RPC system.
 commandParser :: Parser CommandTypes
@@ -70,6 +79,24 @@ commandParser = A.subparser $
       (A.info
         (pure $ ServerCmd QueryAllKeys)
         (A.progDesc "Get all the keys from the key store."))
+  <> A.command "query_servers"
+      (A.info
+        (pure $ ViewCmd QueryServers)
+        (A.progDesc "Get all the keys from the key store."))
+  <> A.command "lock_get"
+      (A.info
+        (ViewCmd <$>
+          (LockGet
+            <$> A.strArgument (A.metavar "NAME" <> A.help "Lock name")
+            <*> A.strArgument (A.metavar "ID" <> A.help "Requester ID.")))
+        (A.progDesc "Get a lock from the view leader."))
+  <> A.command "lock_release"
+      (A.info
+        (ViewCmd <$>
+          (LockRelease
+            <$> A.strArgument (A.metavar "NAME" <> A.help "Lock name")
+            <*> A.strArgument (A.metavar "ID" <> A.help "Requester ID.")))
+        (A.progDesc "Release a lock from the view leader."))
 
 -- | Parser for the optional parameters of the client.
 optionsParser :: Parser Options
@@ -77,8 +104,14 @@ optionsParser = Options
   <$> A.strOption
       ( A.long "server"
      <> A.short 's'
-     <> A.metavar "SERVER"
+     <> A.metavar "SERVERADDR"
      <> A.help "Address of the server to connect"
+     <> A.value "localhost" )
+  <*> A.strOption
+      ( A.long "viewleader"
+     <> A.short 'l'
+     <> A.metavar "VIEWLEADERADDR"
+     <> A.help "Address of the view leader to connect"
      <> A.value "localhost" )
   <*> commandParser
 
@@ -88,4 +121,4 @@ main = A.execParser opts >>= run
     opts = A.info (A.helper <*> optionsParser)
       ( A.fullDesc
      <> A.progDesc "Connect to the server at HOST with the given command"
-     <> A.header "client for a simple RPC implementation" )
+     <> A.header "client for an RPC implementation with locks and a view leader" )
