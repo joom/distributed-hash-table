@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveGeneric, OverloadedStrings, LambdaCase #-}
+{-# LANGUAGE DeriveGeneric, OverloadedStrings #-}
 module RPC where
 
 import Data.Aeson

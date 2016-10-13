@@ -24,7 +24,8 @@ import RPC
 import RPC.Socket
 
 data ServerCondition = ServerCondition
-  { lastHeartbeatTime :: UnixTime
+  { -- ^ Denotes the last valid heartbeat time. Late heartbeats will not update.
+    lastHeartbeatTime :: UnixTime
   , isActive          :: Bool
   , serverAddr        :: SockAddr
   }
@@ -32,7 +33,7 @@ data ServerCondition = ServerCondition
 -- | A type for mutable state.
 data MutState = MutState
   { -- ^ Heartbeats are held in a map. When we don't receive a heartbeat
-    -- for 30 sec, then that heartbeat
+    -- for 30 sec, then we won't accept any heartbeat with the same UUID.
     heartbeats :: M.Map UUIDString ServerCondition
   , epoch      :: TVar Int
   -- ^ A lock will hold the lock name and an identifier that server calls itself.
@@ -73,16 +74,16 @@ runCommand (i, cmd) MutState{..} sockAddr =
             modifyTVar' epoch (+1)
             return $ Executed i Ok
     QueryServers -> atomically $ do
-      addrs <- map (show . serverAddr . snd) <$> ListT.toList (M.stream heartbeats)
+      addrs <- map (show . serverAddr) . filter isActive . map snd <$> ListT.toList (M.stream heartbeats)
       epoch' <- readTVar epoch
       return $ QueryServersResponse i epoch' addrs
     LockGet name cli -> atomically $ do
-      get <- M.lookup name locks
-      case get of
-        Just uuid -> return $ Executed i Retry
-        Nothing -> do
-          M.insert cli name locks
-          return $ Executed i Granted
+        get <- M.lookup name locks
+        case get of
+          Just uuid -> return $ Executed i Retry
+          Nothing -> do
+            M.insert cli name locks
+            return $ Executed i Granted
     LockRelease name cli -> atomically $ do
       get <- M.lookup name locks
       case get of

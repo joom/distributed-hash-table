@@ -109,4 +109,3 @@ findAndConnectOpenPort host = foldM (\success port ->
             putStrLn $ green $ "Connected to " ++ host ++ ":" ++ port
             return $ Just (sock, sockAddr)
   ) Nothing
-
