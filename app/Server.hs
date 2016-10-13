@@ -4,6 +4,7 @@ module Server where
 import Control.Concurrent
 import Control.Monad
 import Control.Monad.STM
+import Control.Concurrent.STM.TVar
 import qualified STMContainers.Map as M
 import qualified ListT
 import Control.Exception
@@ -29,10 +30,12 @@ data Options = Options
 
 -- | A type for mutable state.
 data MutState = MutState
-  { hash :: M.Map String String }
+  { keyStore   :: M.Map String String
+  , heartbeats :: TVar Int
+  }
 
 initialState :: IO MutState
-initialState = MutState <$> M.newIO
+initialState = MutState <$> M.newIO <*> newTVarIO 0
 
 -- | Runs the command with side effects and returns the response that is to be
 -- sent back to the client.
@@ -45,7 +48,7 @@ runCommand (i, cmd) MutState{..} =
       putStrLn $ green "Printing:" ++ " " ++ s
       return $ Executed i Ok
     Get k -> do
-      get <- atomically $ M.lookup k hash
+      get <- atomically $ M.lookup k keyStore
       case get of
         Just v -> do
           putStrLn $ green $ "Got \"" ++ k ++ "\""
@@ -54,11 +57,11 @@ runCommand (i, cmd) MutState{..} =
           putStrLn $ red $ "Couldn't get \"" ++ k ++ "\""
           return $ GetResponse i NotFound ""
     Set k v -> do
-      atomically $ M.insert v k hash
+      atomically $ M.insert v k keyStore
       putStrLn $ green $ "Set \"" ++ k ++ "\" to \"" ++ v ++ "\""
       return $ Executed i Ok
     QueryAllKeys -> do
-      kvs <- atomically $ ListT.toList $ M.stream hash
+      kvs <- atomically $ ListT.toList $ M.stream keyStore
       putStrLn $ green "Returned all keys"
       return $ KeysResponse i Ok (map fst kvs)
 
@@ -77,18 +80,20 @@ runConn (sock, sockAddr) st = do
                    return
   close sock
 
-sendHeartbeat :: Options
+sendHeartbeat :: Options -- ^ Command line options.
               -> SockAddr -- ^ The socket address of the listening server.
-              -> UUIDString
+              -> UUIDString -- ^ UUID created at the beginning of the program.
+              -> MutState -- ^ A reference to the mutable state.
               -> IO ()
-sendHeartbeat Options{..} sockAddr uuid = do
+sendHeartbeat Options{..} sockAddr uuid MutState{..} = do
   attempt <- findAndConnectOpenPort viewLeaderAddr $ map show [39000..39010]
+  i <- atomically $ modifyTVar' heartbeats (+1) >> readTVar heartbeats
   case attempt of
     Nothing ->
       die $ bgRed $ "Heartbeat: Couldn't connect to ports 39000 to 39010 on " ++ viewLeaderAddr
     Just (sock, sockAddr) -> do
       timeoutDie
-        (sendWithLen sock (S.encode (Heartbeat uuid (show sockAddr))))
+        (sendWithLen sock (S.encode (i, Heartbeat uuid (show sockAddr))))
         (red "Timeout error when sending heartbeat request")
       r <- timeoutDie (recvWithLen sock)
             (red "Timeout error when receiving heartbeat response")
@@ -117,8 +122,8 @@ run opt = do
     case attempt of
       Nothing -> die $ bgRed "Couldn't bind ports 38000 to 38010"
       Just (sock, sockAddr) -> do
-        setInterval (sendHeartbeat opt sockAddr uuid >> pure True) 5000000 -- every 5 sec
         st <- initialState
+        setInterval (sendHeartbeat opt sockAddr uuid st >> pure True) 5000000 -- every 5 sec
         loop sock st
         close sock
 
