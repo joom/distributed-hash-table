@@ -73,28 +73,34 @@ runCommand (i, cmd) MutState{..} sockAddr =
             M.insert (ServerCondition now True sockAddr) uuid heartbeats
             modifyTVar' epoch (+1)
             return $ Executed i Ok
-    QueryServers -> atomically $ do
-      addrs <- map (show . serverAddr) . filter isActive . map snd <$> ListT.toList (M.stream heartbeats)
-      epoch' <- readTVar epoch
-      return $ QueryServersResponse i epoch' addrs
-    LockGet name cli -> atomically $ do
+    QueryServers -> do
+      putStrLn $ green "Active servers request"
+      atomically $ do
+        addrs <- map (show . serverAddr) . filter isActive . map snd <$> ListT.toList (M.stream heartbeats)
+        epoch' <- readTVar epoch
+        return $ QueryServersResponse i epoch' addrs
+    LockGet name cli -> do
+      putStrLn $ green $ "Get lock request for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
+      atomically $ do
         get <- M.lookup name locks
         case get of
           Just uuid -> return $ Executed i Retry
           Nothing -> do
             M.insert cli name locks
             return $ Executed i Granted
-    LockRelease name cli -> atomically $ do
-      get <- M.lookup name locks
-      case get of
-        Just cliInMap ->
-          if cliInMap == cli
-          then do
-            M.delete name locks
+    LockRelease name cli -> do
+      putStrLn $ green $ "Release lock request for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
+      atomically $ do
+        get <- M.lookup name locks
+        case get of
+          Just cliInMap ->
+            if cliInMap == cli
+            then do
+              M.delete name locks
+              return $ Executed i Ok
+            else return $ Executed i Forbidden
+          Nothing ->
             return $ Executed i Ok
-          else return $ Executed i Forbidden
-        Nothing ->
-          return $ Executed i Ok
 
 -- | Receives messages, decodes and runs the content if necessary, and returns
 -- the response. Should be run after you accepted a connection.

@@ -142,5 +142,5 @@ main = A.execParser opts >>= run
   where
     opts = A.info (A.helper <*> optionsParser)
       ( A.fullDesc
-     <> A.progDesc "Connect to the server at HOST with the given command"
+     <> A.progDesc "Start the server"
      <> A.header "client for an RPC implementation with locks and a view leader" )

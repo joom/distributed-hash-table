@@ -36,30 +36,30 @@ run :: Int -- ^ Request number by the program.
     -> Options -- ^ Command line options.
     -> IO ()
 run i opt@Options{..} = do
-  let commandPorts = map show $ case cmd of {ServerCmd _ -> [38000..38010] ; ViewCmd _ -> [39000..39010]}
-  let addr = case cmd of {ServerCmd _ -> serverAddr ; ViewCmd _ -> viewLeaderAddr}
   attempt <- findAndConnectOpenPort addr commandPorts
   case attempt of
     Nothing ->
-      die $ bgRed $ "Couldn't connect to ports " ++ head commandPorts ++ " to " ++ last commandPorts ++ " on " ++ addr
+      die $ bgRed $ "Couldn't connect to ports " ++ head commandPorts
+                 ++ " to " ++ last commandPorts ++ " on " ++ addr
     Just (sock, sockAddr) -> do
-      let encoded = case cmd of {ServerCmd c -> S.encode (i, c) ; ViewCmd c -> S.encode (i, c)}
       timeoutDie
         (sendWithLen sock encoded)
         (red "Timeout error when sending")
       r <- timeoutDie (recvWithLen sock) (red "Timeout error when receiving")
+      close sock
+      B.putStrLn r
       case JSON.decode (BL.fromStrict r) :: Maybe Response of
         Just (Executed _ Retry) -> do
-          B.putStrLn r
           putStrLn $ yellow "Waiting for 5 sec"
           threadDelay 5000000 -- wait 5 sec
           run (i + 1) opt
-        _ -> do
-          close sock
-          B.putStrLn r
-          exitSuccess
+        _ -> exitSuccess
+  where
+    (commandPorts, addr, encoded) = case cmd of
+      ServerCmd c -> (map show [38000..38010], serverAddr, S.encode (i, c))
+      ViewCmd c   -> (map show [39000..39010], viewLeaderAddr, S.encode (i, c))
 
--- | Parser for a ServerCommand, i.e. the procedures available in our RPC system.
+-- | Parser for a ServerCommand, i.e. the procedures available in the system.
 commandParser :: Parser CommandTypes
 commandParser = A.subparser $
      A.command "print"
