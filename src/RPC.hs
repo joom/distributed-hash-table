@@ -11,7 +11,8 @@ import qualified Data.ByteString.Char8 as B
 import System.Timeout
 import System.Random
 import System.Exit
-
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Writer.Strict
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
@@ -129,3 +130,16 @@ timeoutAct act fail f = do
 -- error message if a timeout occurs.
 timeoutDie :: IO a -> String -> IO a
 timeoutDie act dieStr = timeoutAct act (die dieStr) return
+
+-- Simple logging abstractions
+
+type Logger m a = WriterT [String] m a
+
+logger :: Monad m => String -> Logger m ()
+logger s = tell [s]
+
+returnAndLog :: IO (a, [String]) -> IO a
+returnAndLog v = do
+  (res, logs) <- v
+  mapM_ putStrLn logs
+  return res

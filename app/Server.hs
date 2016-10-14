@@ -5,6 +5,8 @@ import Control.Concurrent
 import Control.Monad
 import Control.Monad.STM
 import Control.Concurrent.STM.TVar
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Writer.Strict
 import qualified STMContainers.Map as M
 import qualified ListT
 import Control.Exception
@@ -44,25 +46,25 @@ runCommand :: (Int, ServerCommand) -- ^ A pair of the request ID and a command.
            -> IO Response
 runCommand (i, cmd) MutState{..} =
   case cmd of
-    Print s -> do
-      putStrLn $ green "Printing:" ++ " " ++ s
+    Print s -> returnAndLog $ runWriterT $ do
+      logger $ green "Printing:" ++ " " ++ s
       return $ Executed i Ok
-    Get k -> do
-      get <- atomically $ M.lookup k keyStore
+    Get k -> returnAndLog $ runWriterT $ do
+      get <- lift $ atomically $ M.lookup k keyStore
       case get of
         Just v -> do
-          putStrLn $ green $ "Got \"" ++ k ++ "\""
+          logger $ green $ "Got \"" ++ k ++ "\""
           return $ GetResponse i Ok v
         Nothing -> do
-          putStrLn $ red $ "Couldn't get \"" ++ k ++ "\""
+          logger $ red $ "Couldn't get \"" ++ k ++ "\""
           return $ GetResponse i NotFound ""
-    Set k v -> do
-      atomically $ M.insert v k keyStore
-      putStrLn $ green $ "Set \"" ++ k ++ "\" to \"" ++ v ++ "\""
+    Set k v -> returnAndLog $ runWriterT $ do
+      lift $ atomically $ M.insert v k keyStore
+      logger $ green $ "Set \"" ++ k ++ "\" to \"" ++ v ++ "\""
       return $ Executed i Ok
-    QueryAllKeys -> do
-      kvs <- atomically $ ListT.toList $ M.stream keyStore
-      putStrLn $ green "Returned all keys"
+    QueryAllKeys -> returnAndLog $ runWriterT $ do
+      kvs <- lift $ atomically $ ListT.toList $ M.stream keyStore
+      logger $ green "Returned all keys"
       return $ KeysResponse i Ok (map fst kvs)
 
 -- | Receives messages, decodes and runs the content if necessary, and returns

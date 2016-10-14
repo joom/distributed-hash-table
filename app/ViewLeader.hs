@@ -5,6 +5,8 @@ import Control.Concurrent
 import Control.Monad
 import Control.Monad.STM
 import Control.Concurrent.STM.TVar
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Writer.Strict
 import qualified STMContainers.Map as M
 import qualified ListT
 import Control.Exception
@@ -56,50 +58,59 @@ runCommand (i, cmd) MutState{..} sockAddr =
   case cmd of
     Heartbeat uuid port -> do
       now <- getUnixTime
-      atomically $ do
-        get <- M.lookup uuid heartbeats
+      returnAndLog $ atomically $ runWriterT $ do
+        get <- lift $ M.lookup uuid heartbeats
         case get of
           Just cond@ServerCondition{..} -> do
             let expireTime = lastHeartbeatTime `addUnixDiffTime` secondsToUnixDiffTime 30
             if isActive && (now < expireTime)
               then do -- Normal heartbeat update
-                M.insert (cond {lastHeartbeatTime = now}) uuid heartbeats
+                lift $ M.insert (cond {lastHeartbeatTime = now}) uuid heartbeats
+                logger $ green $ "Heartbeat received from " ++ port
                 return $ Executed i Ok
               else do -- Expired server connection
-                M.insert (cond {isActive = False}) uuid heartbeats
-                modifyTVar' epoch (+1)
+                lift $ M.insert (cond {isActive = False}) uuid heartbeats
+                lift $ modifyTVar' epoch (+1)
+                logger $ red $ "Expired heartbeat received from " ++ port
                 return $ Executed i Forbidden
           Nothing -> do -- New server connection
-            M.insert (ServerCondition now True sockAddr) uuid heartbeats
-            modifyTVar' epoch (+1)
+            lift $ M.insert (ServerCondition now True sockAddr) uuid heartbeats
+            lift $ modifyTVar' epoch (+1)
+            logger $ green $ "New heartbeat received from " ++ port
             return $ Executed i Ok
-    QueryServers -> do
-      putStrLn $ green "Active servers request"
-      atomically $ do
-        addrs <- map (show . serverAddr) . filter isActive . map snd <$> ListT.toList (M.stream heartbeats)
-        epoch' <- readTVar epoch
+    QueryServers ->
+      returnAndLog $ atomically $ runWriterT $ do
+        addrs <- lift $ map (show . serverAddr) . filter isActive . map snd
+                        <$> ListT.toList (M.stream heartbeats)
+        epoch' <- lift $ readTVar epoch
+        logger $ green "Active servers request"
         return $ QueryServersResponse i epoch' addrs
-    LockGet name cli -> do
-      putStrLn $ green $ "Get lock request for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
-      atomically $ do
-        get <- M.lookup name locks
+    LockGet name cli ->
+      returnAndLog $ atomically $ runWriterT $ do
+        get <- lift $ M.lookup name locks
         case get of
-          Just uuid -> return $ Executed i Retry
+          Just uuid -> do
+            logger $ green $ "Get lock for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
+            return $ Executed i Retry
           Nothing -> do
-            M.insert cli name locks
+            lift $ M.insert cli name locks
+            logger $ red $ "Get lock failed for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
             return $ Executed i Granted
-    LockRelease name cli -> do
-      putStrLn $ green $ "Release lock request for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
-      atomically $ do
-        get <- M.lookup name locks
+    LockRelease name cli ->
+      returnAndLog $ atomically $ runWriterT $ do
+        get <- lift $ M.lookup name locks
         case get of
           Just cliInMap ->
             if cliInMap == cli
             then do
-              M.delete name locks
+              logger $ green $ "Release lock for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
+              lift $ M.delete name locks
               return $ Executed i Ok
-            else return $ Executed i Forbidden
-          Nothing ->
+            else do
+              logger $ red $ "Release lock failed for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
+              return $ Executed i Forbidden
+          Nothing -> do
+            logger $ green $ "Release nonexistent lock for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
             return $ Executed i Ok
 
 -- | Receives messages, decodes and runs the content if necessary, and returns

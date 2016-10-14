@@ -85,7 +85,7 @@ getClientSocket host serv = do
     sock <- socket (addrFamily serverAddr) Stream defaultProtocol
     return (sock, addrAddress serverAddr)
 
--- | Tries to connect to a port from 38000 to 38010.
+-- | Tries to connect to one of the given ports.
 -- Returns Nothing if they all fail. Has side effect of printing log messages.
 findAndConnectOpenPort :: HostName -> [ServiceName] -> IO (Maybe (Socket, SockAddr))
 findAndConnectOpenPort host = foldM (\success port ->
