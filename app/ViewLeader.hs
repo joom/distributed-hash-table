@@ -106,13 +106,13 @@ runCommand (i, cmd) st@MutState{..} sockAddr =
         get <- lift $ M.lookup name locks
         case get of
           Just uuid -> do
-            lift $ MM.insert cli name lockWaiting
             logger $ red $ "Get lock failed for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
+            lift $ MM.insert name cli lockWaiting
             detectDeadlock st
             return $ Executed i Retry
           Nothing -> do
             lift $ M.insert cli name locks
-            lift $ MM.delete cli name lockWaiting
+            lift $ MM.delete name cli lockWaiting
             logger $ green $ "Get lock for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
             return $ Executed i Granted
     LockRelease name cli ->
