@@ -208,15 +208,18 @@ detectDeadlock st@MutState{..} = do
         map (\(name, cli) -> (Lock, name, [cli])) lockList
         -- the client 'cli' is waiting for the lock names in `names`
         ++ map (\(cli, names) -> (Requester, cli, names)) lockWaitList
-  let deadlocks = zip [1..] $ map (map vertexFn) (cycles g)
+  let deadlocks = map (map vertexFn) (cycles g)
   unless (null deadlocks) $
-    forM_ deadlocks $ \(i, deadlock) -> do
-      logger $ bgRed $ "Deadlock #" ++ show i
+    forM_ deadlocks $ \deadlock -> do
+      logger $ bgRed $ "Deadlock!"
       forM_ deadlock $ \(content, key, values) ->
         case content of
           Lock ->
             logger $ red $ "The lock \"" ++ key ++ "\" is held by " ++ intercalate ", " values
-          Requester ->
+          Requester -> do
+            -- assuming a requester id only requests one lock at a time
+            -- if not, this needs to be fixed later. TODO
+            lift $ MM.deleteByKey key lockWaiting
             logger $ red $ "The client \"" ++ key ++ "\" is waiting for " ++ intercalate ", " values
 
 main :: IO ()
