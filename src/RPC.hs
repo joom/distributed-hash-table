@@ -16,6 +16,8 @@ import Control.Monad.Trans.Writer.Strict
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
+import Data.Array
+import Data.Graph
 
 -- Data types and typeclass instances
 
@@ -143,3 +145,19 @@ returnAndLog v = do
   (res, logs) <- v
   mapM_ putStrLn logs
   return res
+
+-- | A function that finds all cycles in a graph.  A cycle is given as a
+-- finite list of the vertices in order of occurrence, where each vertex
+-- only appears once. Written by Chris Smith, April 20, 2009.
+-- <https://cdsmith.wordpress.com/2009/04/20/code-for-manipulating-graphs-in-haskell/>
+cycles :: Graph -> [[Vertex]]
+cycles g = concatMap cycles' (vertices g)
+  where cycles' v   = build [] v v
+        build p s v =
+          let p'         = p ++ [v]
+              local      = [ p' | x <- (g!v), x == s ]
+              good w     = w > s && not (w `elem` p')
+              ws         = filter good (g ! v)
+              extensions = concatMap (build p' s) ws
+          in  local ++ extensions
+
