@@ -2,6 +2,9 @@
 
 A remote procedure call implementation with locks and a view leader.
 
+Written as a project for COMP360 Distributed Systems, Fall 2016, Prof. Jeff
+Epstein, Wesleyan University.
+
 ## Installation
 
 Make sure you have [Stack](http://haskellstack.org) installed.

@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards, TupleSections#-}
+{-# LANGUAGE RecordWildCards, TupleSections #-}
 module ViewLeader where
 
 import Control.Concurrent
@@ -7,7 +7,6 @@ import Control.Monad.STM
 import Control.Concurrent.STM.TVar
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer.Strict
-import Control.Arrow ((&&&))
 import qualified STMContainers.Map as M
 import qualified STMContainers.Multimap as MM
 import qualified STMContainers.Set as Set
@@ -45,7 +44,6 @@ isAlive now ServerCondition{..} = now < expireTime
   where
     expireTime = lastHeartbeatTime `addUnixDiffTime` secondsToUnixDiffTime 30
 
-
 -- | A type for mutable state.
 data MutState = MutState
   { -- ^ Heartbeats are held in a map. When we don't receive a heartbeat
@@ -78,7 +76,7 @@ runCommand (i, cmd) st@MutState{..} sockAddr =
       returnAndLog $ atomically $ runWriterT $ do
         get <- lift $ M.lookup uuid heartbeats
         case get of
-          Just cond@ServerCondition{..} -> do
+          Just cond@ServerCondition{..} ->
             if isAlive now cond
               then do -- Normal heartbeat update
                 lift $ M.insert (cond {lastHeartbeatTime = now}) uuid heartbeats
@@ -155,7 +153,7 @@ loop sock st = do
   forkIO (runConn conn st)
   loop sock st
 
--- | Goes through all the servers that expired, but not yet marked deactive.
+-- | Goes through all the servers that expired, but not yet marked inactive.
 -- For each of them, it looks for locks held by those servers, releases them.
 -- Then marks that server inactive.
 cancelLocksAfterCrash :: UnixTime -- ^ Function call time, i.e. now
@@ -211,7 +209,7 @@ detectDeadlock st@MutState{..} = do
   let deadlocks = map (map vertexFn) (cycles g)
   unless (null deadlocks) $
     forM_ deadlocks $ \deadlock -> do
-      logger $ bgRed $ "Deadlock!"
+      logger $ bgRed "Deadlock!"
       forM_ deadlock $ \(content, key, values) ->
         case content of
           Lock ->
