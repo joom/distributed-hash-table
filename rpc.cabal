@@ -25,6 +25,9 @@ library
                      , transformers >= 0.4
                      , containers
                      , array
+                     , stm >= 2.4
+                     , stm-containers >= 0.2
+                     , sequence
   default-language:    Haskell2010
 
 executable rpc-client
@@ -80,6 +83,7 @@ executable rpc-view-leader
                      , unix-time >= 0.3
                      , transformers >= 0.4
                      , array >= 0.5
+                     , sequence
   default-language:    Haskell2010
 
 test-suite rpc-test

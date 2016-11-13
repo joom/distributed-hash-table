@@ -3,6 +3,6 @@ resolver: lts-6.17
 packages:
 - '.'
 
-extra-deps: ["chalk-0.1.0.2"]
+extra-deps: ["chalk-0.1.0.2","sequence-0.9.8"]
 flags: {}
 extra-package-dbs: []

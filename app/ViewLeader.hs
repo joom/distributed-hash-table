@@ -1,6 +1,7 @@
 {-# LANGUAGE RecordWildCards, TupleSections #-}
 module ViewLeader where
 
+import Control.Arrow (second)
 import Control.Concurrent
 import Control.Monad
 import Control.Monad.STM
@@ -8,7 +9,6 @@ import Control.Concurrent.STM.TVar
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer.Strict
 import qualified STMContainers.Map as M
-import qualified STMContainers.Multimap as MM
 import qualified STMContainers.Set as Set
 import qualified ListT
 import Control.Exception
@@ -16,6 +16,7 @@ import qualified Data.Graph as G
 import Data.UnixTime
 import Data.List (intercalate)
 import Data.Maybe
+import qualified Data.Sequence.Queue as Q
 import Network.Socket hiding (recv)
 import Network.Socket.ByteString (recv, sendAll)
 import qualified Network.Socket.ByteString as L
@@ -55,13 +56,14 @@ data MutState = MutState
   -- If a key exists in the map, then there's a lock on that lock name.
   -- To delete a lock, you have to delete the key from the map.
   , locks :: M.Map String String
-  -- ^ Maps a client identifier to a set of lock names the client is waiting for.
+  -- ^ Maps a client identifier to a queue of lock names the client is waiting for.
+  -- The queue has to hold unique names.
   -- This will later be used to construct a graph to detect a deadlock.
-  , lockWaiting :: MM.Multimap String String
+  , lockWaiting :: M.Map String (Q.Queue String)
   }
 
 initialState :: IO MutState
-initialState = MutState <$> M.newIO <*> newTVarIO 0 <*> M.newIO <*> MM.newIO
+initialState = MutState <$> M.newIO <*> newTVarIO 0 <*> M.newIO <*> M.newIO
 
 -- | Runs the command with side effects and returns the response that is to be
 -- sent back to the client.
@@ -105,12 +107,13 @@ runCommand (i, cmd) st@MutState{..} sockAddr =
         case get of
           Just uuid -> do
             logger $ red $ "Get lock failed for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
-            lift $ MM.insert name cli lockWaiting
+            lift $ pushToQueueMap name cli lockWaiting
             detectDeadlock st
             return $ Executed i Retry
           Nothing -> do
+            lift $ pushToQueueMap name cli lockWaiting
+            newOwner <- lift $ popFromQueueMap cli lockWaiting
             lift $ M.insert cli name locks
-            lift $ MM.delete name cli lockWaiting
             logger $ green $ "Get lock for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
             return $ Executed i Granted
     LockRelease name cli ->
@@ -171,7 +174,7 @@ cancelLocksAfterCrash now MutState{..} = do
                     ++ intercalate ", " lockNamesToDelete
         lift $ forM_ lockNamesToDelete $ \name -> do
           M.delete name locks
-          MM.deleteByKey name lockWaiting
+          M.delete name lockWaiting
       lift $ do -- Mark inactive
         modifyTVar' epoch (+1)
         M.insert (cond {isActive = False}) uuid heartbeats)
@@ -188,11 +191,8 @@ cancelLocksAfterCrashIO st = do
 
 -- | An association list of keys to the requesters waiting for that key.
 waitedLocks :: MutState -> STM [(String, [String])]
-waitedLocks MutState{..} = do
-  keys <- ListT.toList (MM.streamKeys lockWaiting)
-  sets <- mapM (\key -> fromJust <$> MM.lookupByKey key lockWaiting) keys
-  setsToLists <- mapM (ListT.toList . Set.stream) sets
-  return $ zip keys setsToLists
+waitedLocks MutState{..} =
+  map (second queueToList) <$> ListT.toList (M.stream lockWaiting)
 
 data GraphContent = Lock | Requester
 
@@ -217,7 +217,7 @@ detectDeadlock st@MutState{..} = do
           Requester -> do
             -- assuming a requester id only requests one lock at a time
             -- if not, this needs to be fixed later. TODO
-            lift $ MM.deleteByKey key lockWaiting
+            lift $ M.delete key lockWaiting
             logger $ red $ "The client \"" ++ key ++ "\" is waiting for " ++ intercalate ", " values
 
 main :: IO ()
