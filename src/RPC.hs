@@ -164,36 +164,23 @@ cycles g = concatMap cycles' (vertices g)
               extensions = concatMap (build p' s) ws
           in  local ++ extensions
 
--- Simple queue abstractions
+-- Simple queue abstractions for locks
+
+type LockName = String
+type ClientId = String
 
 queueToList :: Q.Queue a -> [a]
 queueToList q = case Q.viewl q of
   Q.EmptyL -> []
   x Q.:< xs -> x : queueToList xs
 
+queueHead :: Q.Queue a -> Maybe a
+queueHead q = case Q.viewl q of
+  Q.EmptyL -> Nothing
+  x Q.:< _ -> Just x
+
 -- ^ Checks if an element is in a queue.
 qElem :: Eq a => a -> Q.Queue a -> Bool
 qElem e q = case Q.viewl q of
   Q.EmptyL -> False
   x Q.:< xs -> (x == e) || qElem e xs
-
--- ^ Pushes the given value to the queue associated with the given key in the
--- given map. If the value is already in the queue, the it is not added.
-pushToQueueMap :: String -> String -> M.Map String (Q.Queue String) -> STM ()
-pushToQueueMap k v m = M.lookup k m >>= \look ->
-  M.insert (case look of
-    Nothing -> Q.singleton v
-    Just q -> if v `qElem` q then q else q Q.|> v) k m
-
--- ^ Pops ans returns the first element of the queue and updates the queue map
--- with the rest of the queue. i.e. removes the head of the queue.
-popFromQueueMap :: String -> M.Map String (Q.Queue String) -> STM (Maybe String)
-popFromQueueMap k m = M.lookup k m >>= \case
-    Nothing -> return Nothing
-    Just q -> case Q.viewl q of
-      Q.EmptyL -> return Nothing
-      x Q.:< xs -> do
-        case Q.viewl xs of -- if the rest is empty, delete the key from map
-          Q.EmptyL -> M.delete k m
-          _ -> M.insert xs k m
-        return $ Just x
