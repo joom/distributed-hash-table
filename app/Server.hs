@@ -47,7 +47,8 @@ data MutState = MutState
   }
 
 initialState :: IO MutState
-initialState = MutState <$> M.newIO <*> M.newIO <*> newTVarIO 0 <*> newTVarIO 0 <*> newTVarIO 0 <*> newTVarIO []
+initialState = MutState <$> M.newIO <*> M.newIO <*> newTVarIO 0
+                        <*> newTVarIO 0 <*> newTVarIO 0 <*> newTVarIO []
 
 -- | Runs the command with side effects and returns the response that is to be
 -- sent back to the client.
@@ -142,21 +143,20 @@ runConn (sock, sockAddr) opt st = do
   close sock
 
 sendHeartbeat :: Options -- ^ Command line options.
-              -> SockAddr -- ^ The socket address of the listening server.
               -> MutState -- ^ A reference to the mutable state.
+              -> AddrString -- ^ The socket address of the listening server.
               -> IO ()
-sendHeartbeat opt@Options{..} sockAddr st@MutState{..} = do
-  attempt <- findAndConnectOpenPort viewLeaderAddr $ map show [39000..39010]
+sendHeartbeat opt@Options{..} st@MutState{..} addrStr = do
   i <- atomically $ modifyTVar' heartbeats (+1) >> readTVar heartbeats
-  case attempt of
+  findAndConnectOpenPort viewLeaderAddr (map show [39000..39010])  >>= \case
     Nothing ->
       die $ bgRed $ "Heartbeat: Couldn't connect to ports 39000 to 39010 on " ++ viewLeaderAddr
     Just (sock, sockAddr) -> do
       timeoutDie
-        (sendWithLen sock (S.encode (i, Heartbeat uuid (show sockAddr))))
+        (sendWithLen sock (S.encode (i, Heartbeat uuid addrStr)))
         (red "Timeout error when sending heartbeat request")
       r <- timeoutDie (recvWithLen sock)
-            (red "Timeout error when receiving heartbeat response")
+             (red "Timeout error when receiving heartbeat response")
       close sock
       case JSON.decode (BL.fromStrict r) of
         Just (HeartbeatResponse _ Ok newEpoch) -> do
@@ -172,6 +172,7 @@ sendHeartbeat opt@Options{..} sockAddr st@MutState{..} = do
 
 updateActiveServers :: Options -> MutState -> IO ()
 updateActiveServers opt@Options{..} st@MutState{..} = do
+  putStrLn $ yellow "Updating active servers list"
   attempt <- findAndConnectOpenPort viewLeaderAddr $ map show [39000..39010]
   i <- atomically $ readTVar heartbeats
   case attempt of
@@ -198,9 +199,9 @@ updateActiveServers opt@Options{..} st@MutState{..} = do
 
 rebalanceKeys :: Options -> MutState -> IO ()
 rebalanceKeys Options{..} MutState{..} = do
+  putStrLn "Starting rebalancing keys"
   -- TODO
   -- keyPairs <- atomically $ undefined
-  putStrLn $ "Starting rebalancing keys"
 
 -- | The main loop that keeps accepting more connections.
 loop :: Socket -> Options -> MutState -> IO ()
@@ -210,16 +211,17 @@ loop sock opt st = do
   loop sock opt st
 
 run :: Options -> IO ()
-run opt = do
+run optUser = do
     uuidStr <- newUUID
-    let opt = opt {uuid = uuidStr}
+    let opt = optUser {uuid = uuidStr}
     attempt <- findAndListenOpenPort $ map show [38000..38010]
     case attempt of
       Nothing -> die $ bgRed "Couldn't bind ports 38000 to 38010"
       Just (sock, sockAddr) -> do
         st <- initialState
-        sendHeartbeat opt sockAddr st -- the initial heartbeat
-        setInterval (sendHeartbeat opt sockAddr st >> pure True) 5000000 -- every 5 sec
+        let addrStr = show sockAddr
+        _ <- forkIO $ sendHeartbeat opt st addrStr -- the initial heartbeat
+        setInterval (sendHeartbeat opt st addrStr >> pure True) 5000000 -- every 5 sec
         loop sock opt st
         close sock
 
