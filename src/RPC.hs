@@ -4,9 +4,10 @@ module RPC where
 import Data.Aeson
 import qualified Data.UUID
 import Data.Serialize
+import Data.Hashable
 import GHC.Generics
 import Network.Socket hiding (recv)
-import Network.Socket.ByteString (recv, sendAll)
+import Network.Socket.ByteString
 import qualified Data.ByteString.Char8 as B
 import System.Timeout
 import System.Random
@@ -18,6 +19,7 @@ import Control.Exception
 import Control.Monad
 import Data.Array
 import Data.Graph
+import Data.List
 import qualified STMContainers.Map as M
 import Control.Monad.STM
 import qualified Data.Sequence.Queue as Q
@@ -25,11 +27,16 @@ import qualified Data.Sequence.Queue as Q
 -- Data types and typeclass instances
 
 type UUIDString = String
+type AddrString = String -- of the format "localhost:8000"
+type Epoch = Int
+type CommitId = Int
 
 data ServerCommand =
-    Print String
-  | Get String
-  | Set String String
+    Get { k :: String }
+  | GetR { k :: String , epochInput :: Epoch }
+  | SetRVote { k :: String , v :: String , epochInput :: Epoch }
+  | SetRCommit { k :: String , commitId :: Int }
+  | SetRCancel { k :: String , commitId :: Int }
   | QueryAllKeys
   deriving (Show, Eq, Generic)
 
@@ -70,10 +77,22 @@ instance FromJSON Status where
     _                  -> mempty
 
 data Response =
-    Executed             { i :: Int , status :: Status }
-  | GetResponse          { i :: Int , status :: Status , value :: String }
-  | KeysResponse         { i :: Int , status :: Status , keys :: [String] }
-  | QueryServersResponse { i :: Int , epoch  :: Int    , result :: [String] }
+    Executed
+      { i :: Int , status :: Status }
+  | GetResponse
+      { i :: Int , status :: Status , value :: String }
+  | ExecutedR
+      { i :: Int , status :: Status , epoch :: Epoch }
+  -- | GetResponseR
+  --     { i :: Int , status :: Status , value :: String , epoch :: Epoch }
+  | SetResponseR
+      { i :: Int , status :: Status , epoch :: Epoch , storedId :: CommitId  }
+  | KeysResponse
+      { i :: Int , status :: Status , keys :: [String] }
+  | QueryServersResponse
+      { i :: Int , epoch :: Epoch , result :: [(UUIDString, AddrString)] }
+  | HeartbeatResponse
+      { i :: Int , status :: Status , epoch :: Epoch }
   deriving (Show, Eq, Generic)
 
 instance ToJSON Response
@@ -184,3 +203,24 @@ qElem :: Eq a => a -> Q.Queue a -> Bool
 qElem e q = case Q.viewl q of
   Q.EmptyL -> False
   x Q.:< xs -> (x == e) || qElem e xs
+
+-- Hashing abstractions
+
+replicationCount :: Int
+replicationCount = 3
+
+-- ^ Takes a key and returns which buckets that key should be stored in.  The
+-- first one will be the primary one, and the next two will be the backup
+-- buckets. If the list of all buckets has at least replicationCount elements,
+-- then this function will always return a list of replicationCount elements.
+bucketAllocator :: String -- ^ The key we want to add.
+                -> [a] -- ^ List of buckets, in some abstraction.
+                -> (a -> UUIDString) -- ^ A function to extract the UUIDString from the abstraction.
+                -> [a] -- ^ a maximum of replicationCount elements.
+bucketAllocator s xs f =
+    if length after >= replicationCount
+    then take replicationCount after
+    else after ++ take (replicationCount - length after) until
+  where
+    xs' = sortBy (\a b -> compare (hash (f a)) (hash (f b))) xs
+    (until, after) = partition ((hash s <) . hash . f) xs'

@@ -5,10 +5,14 @@ import Network.Socket.ByteString (recv, sendAll)
 import qualified Data.ByteString.Char8 as B
 import Control.Monad
 import Control.Exception
+import Control.Arrow
 import System.Timeout
 import System.Console.Chalk
 
 import RPC
+
+addrStringPair :: AddrString -> (HostName, ServiceName)
+addrStringPair = second tail . span (/= ':')
 
 -- Abstractions to deal with sockets and sending the length first.
 

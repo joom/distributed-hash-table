@@ -1,9 +1,11 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards, LambdaCase #-}
 
 module Client where
 
 import Control.Concurrent (threadDelay)
 import Control.Monad
+import Control.Monad.STM
+import Control.Concurrent.STM.TVar
 import Control.Exception
 import qualified Options.Applicative as A
 import Options.Applicative (Parser, (<>))
@@ -13,12 +15,24 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
 import qualified Data.Serialize as S
 import qualified Data.Aeson as JSON
+import Data.Hashable
+import Data.Maybe
+import Data.Either
+import Data.List
 import System.Console.Chalk
 import System.Timeout
 import System.Exit
 
 import RPC
 import RPC.Socket
+
+-- | A type for mutable state.
+data MutState = MutState
+  { nextRequestId :: TVar Int
+  }
+
+initialState :: IO MutState
+initialState = MutState <$> newTVarIO 0
 
 data CommandTypes =
     ServerCmd ServerCommand
@@ -31,53 +45,204 @@ data Options = Options
   , cmd            :: CommandTypes
   } deriving (Show)
 
+data RequestError =
+    CouldNotConnect [ServiceName]
+  | SendingTimeout
+  | ReceivingTimeout
+  | InvalidResponse
+  deriving (Show)
+
+getResponse :: Options
+            -> MutState
+            -> CommandTypes -- ^ The command to send.
+            -> Maybe HostName
+            -> Maybe [ServiceName] -- ^ The ports to try connecting.
+            -> IO (Either RequestError Response)
+getResponse opt@Options{..} st@MutState{..} cmd' host ports = do
+    i <- atomically $ readTVar nextRequestId
+    atomically $ modifyTVar' nextRequestId (+1)
+    let commandPorts = pick (fromMaybe (map show [38000..38010]) ports) (map show [39000..39010])
+    let addr         = fromMaybe (pick serverAddr viewLeaderAddr) host
+    let encoded      = pick' (\c -> S.encode (i, c)) (\c -> S.encode (i, c))
+    attempt <- findAndConnectOpenPort addr commandPorts
+    case attempt of
+      Nothing -> return $ Left $ CouldNotConnect commandPorts
+      Just (sock, sockAddr) -> do
+        either <- timeoutAct
+          (sendWithLen sock encoded)
+          (return $ Left SendingTimeout) $ \() ->
+            timeoutAct (recvWithLen sock) (return $ Left ReceivingTimeout) $ \r ->
+              case JSON.decode (BL.fromStrict r) :: Maybe Response of
+                Just res -> return $ Right res
+                _ -> return $ Left InvalidResponse
+        close sock
+        return either
+  where
+    pick  a b = case cmd of {ServerCmd _ -> a   ; ViewCmd _ -> b}
+    pick' f g = case cmd of {ServerCmd c -> f c ; ViewCmd c -> g c}
+
+getServers :: Options -> MutState -> IO (Maybe (Int, [(UUIDString, String)]))
+getServers opt@Options{..} st@MutState{..} = do
+  res <- getResponse opt st (ViewCmd QueryServers) Nothing Nothing
+  case res of
+    Left err -> do
+      putStrLn $ bgRed $ show err
+      return Nothing
+    Right (QueryServersResponse _ epoch servers) -> do
+      return $ Just (epoch, servers)
+    Right _ -> do
+      putStrLn $ bgRed "Received incorrect kind of response"
+      return Nothing
+
 -- | Runs the program once it receives a successful parse of the input given.
-run :: Int -- ^ Request number by the program.
-    -> Options -- ^ Command line options.
+run :: Options -- ^ Command line options.
+    -> MutState
     -> IO ()
-run i opt@Options{..} = do
-  attempt <- findAndConnectOpenPort addr commandPorts
-  case attempt of
-    Nothing ->
-      die $ bgRed $ "Couldn't connect to ports " ++ head commandPorts
-                 ++ " to " ++ last commandPorts ++ " on " ++ addr
-    Just (sock, sockAddr) -> do
-      timeoutDie
-        (sendWithLen sock encoded)
-        (red "Timeout error when sending")
-      r <- timeoutDie (recvWithLen sock) (red "Timeout error when receiving")
-      close sock
-      B.putStrLn r
-      case JSON.decode (BL.fromStrict r) :: Maybe Response of
-        Just (Executed _ Retry) -> do
+run opt@Options{..} st@MutState{..} =
+  case cmd of
+    ServerCmd c@GetR{..} ->
+      getServers opt st >>= \case
+        Nothing -> die $ bgRed "Couldn't get active servers from view leader"
+        Just (viewEpoch, servers) -> do
+          let buckets = bucketAllocator k servers fst
+          result <- foldM (\success (uuidStr, addr) ->
+            case success of
+              Just _ -> return success -- we already got it successfully
+              Nothing -> do
+                let (host, port) = addrStringPair addr
+                getResponse opt st cmd (Just host) (Just [port]) >>= \case
+                  Left _ -> return Nothing
+                  Right res@GetResponse{..} ->
+                    return $ Just res
+                  Right _ -> return Nothing
+            ) Nothing buckets
+          case result of
+            Nothing -> die $ bgRed "All servers failed"
+            Just res -> print res
+    ServerCmd c@SetRVote{..} ->
+      getServers opt st >>= \case
+        Nothing -> die $ bgRed "Couldn't get active servers from view leader"
+        Just (viewEpoch, servers) -> do -- Two phase commit
+          let buckets = bucketAllocator k servers fst
+          responsesM <- forM buckets $ \(uuidStr, addrStr) -> do
+            let (host, port) = addrStringPair addrStr
+            getResponse opt st cmd (Just host) (Just [port]) -- Phase one request
+          let validResponses = rights responsesM
+          if all isRight responsesM && all ((== Ok) . status) validResponses
+          then do -- Finalize commit
+            acknowledgmentsM <- forM (zip buckets validResponses) $ \((uuidStr, addrStr), res) ->
+              case res of
+                SetResponseR i Ok ep commitId -> do
+                  let (host, port) = addrStringPair addrStr
+                  getResponse opt st (ServerCmd (SetRCancel k commitId)) (Just host) (Just [port]) >>= \case
+                    Right res@(Executed _ Ok) -> do
+                      putStrLn $ green $ "Successfully finalized commit " ++ show commitId
+                                 ++ " for the key \"" ++ k ++ "\" on " ++ addrStr
+                      return $ Just res
+                    Right _ -> do
+                      putStrLn $ red $ "Couldn't finalize commit " ++ show commitId
+                                 ++ " for key \"" ++ k ++ "\" on " ++ addrStr
+                      return Nothing
+                    Left err -> do
+                      putStrLn $ red $ "Couldn't get response from " ++ addrStr
+                                 ++ " during commit finalization for the key \""
+                                 ++ k ++ " with id " ++ show commitId
+                                 ++ " because of " ++ show err
+                      return Nothing
+                _ -> do
+                  putStrLn $ bgRed $ "Unreachable case"
+                  return Nothing
+            case sequence acknowledgmentsM of
+              Nothing -> die $ bgRed $ "Commit failed"
+              Just acknowledgments -> do
+                putStrLn $ green $ "Commit succeeded: " ++ show acknowledgments
+                exitSuccess
+          else do -- Cancel commit
+            let bucketsToCancel = filter (isRight . snd) (zip buckets responsesM)
+            cancelAll <- forM bucketsToCancel $ \((uuidStr, addrStr), res) ->
+              case res of
+                Right (SetResponseR i Ok ep commitId) -> do
+                  let (host, port) = addrStringPair addrStr
+                  getResponse opt st (ServerCmd (SetRCancel k commitId)) (Just host) (Just [port]) >>= \case
+                    Right (Executed _ Ok) ->
+                      putStrLn $ yellow $ "Successfully cancelled commit " ++ show commitId
+                                 ++ " for the key \"" ++ k ++ "\" on " ++ addrStr
+                    _ ->
+                      putStrLn $ red $ "Couldn't cancel commit " ++ show commitId
+                                 ++ " for key \"" ++ k ++ "\" on " ++ addrStr
+                _ -> putStrLn $ yellow $ "There is no commit to cancel for the key \"" ++ k
+                                ++ "\" on " ++ addrStr
+            die $ bgRed "Not all servers voted yes"
+
+          -- case sequence responsesM of
+          --   Left err -> die $ bgRed "Couldn't get a vote from a server in phase one of commit"
+          --   Right responses -> -- checking phase one responses
+              -- case forM responses (\case -- checking if everyone voted yes
+              --     SetResponseR i Ok ep -> if viewEpoch == ep then Just i else Nothing
+              --     SetResponseR i Forbidden ep -> Nothing
+              --     _ -> Nothing) of
+              --   Nothing -> do
+              --     cancelAll <- forM (zip undefined buckets) $ \(i, (uuidStr, addrStr)) -> do
+              --       let (host, port) = addrStringPair addrStr
+              --       getResponse opt st (SetRCancel k _) (Just host) (Just [port]) -- Phase two request to cancel
+              --     die $ bgRed "Not all servers voted yes"
+              --   Just is -> do
+              --     acknowledgmentsM <- forM (zip is buckets) $ \(i, (uuidStr, addrStr)) -> do
+              --       let (host, port) = addrStringPair addrStr
+              --       getResponse opt st (SetRCommit k i) (Just host) (Just [port]) -- Phase two request to confirm
+              --     case sequence acknowledgmentsM of
+              --       Left err ->
+              --         die $ red $ "Failed to set the key \"" ++ k ++ "\" to \""
+              --                    ++ v ++ "\" in the servers " ++ show (map snd buckets)
+              --                    ++ " because of " ++ show err
+              --       Right acknowledgments -> do
+              --         putStrLn $ green "Successfully set the key \"" ++ k ++ "\" to \""
+              --                    ++ v ++ "\" in the servers "  ++ show (map snd buckets)
+              --         exitSuccess
+--
+    ServerCmd QueryAllKeys -> -- connects to all active servers and fetches all keys
+      getServers opt st >>= \case
+        Nothing -> die $ bgRed "Couldn't get active servers from view leader"
+        Just (viewEpoch, servers) -> do
+          keysLists <- forM servers $ \server@(uuidString, addrStr) -> do
+            let (host, port) = addrStringPair addrStr
+            getResponse opt st cmd (Just host) (Just [port]) >>= \case
+              Left err -> do
+                putStrLn $ red "Failed to get keys from the server " ++ addrStr ++ " because of " ++ show err
+                return []
+              Right KeysResponse{..} -> return keys
+              Right _ -> do
+                putStrLn $ red "The server " ++ addrStr ++ " returned an invalid response instead of keys"
+                return []
+          let allKeys = sort $ nub $ concat keysLists
+          print allKeys
+    ServerCmd _ -> error $ bgRed "Unimplemented on purpose"
+    ViewCmd _ ->
+      getResponse opt st cmd Nothing Nothing >>= \case
+        Left err -> die $ bgRed "View leader command failed because of " ++ show err
+        Right c@(Executed _ Retry) -> do
+          print cmd
           putStrLn $ yellow "Waiting for 5 sec"
           threadDelay 5000000 -- wait 5 sec
-          run (i + 1) opt
-        _ -> exitSuccess
-  where
-    (commandPorts, addr, encoded) = case cmd of
-      ServerCmd c -> (map show [38000..38010], serverAddr, S.encode (i, c))
-      ViewCmd c   -> (map show [39000..39010], viewLeaderAddr, S.encode (i, c))
+          run opt st
+        Right c -> print cmd >> exitSuccess
 
 -- | Parser for a ServerCommand, i.e. the procedures available in the system.
 commandParser :: Parser CommandTypes
 commandParser = A.subparser $
-     A.command "print"
+     A.command "getr"
       (A.info
         (ServerCmd <$>
-          (Print <$> A.strArgument (A.metavar "STR" <> A.help "String to print")))
-        (A.progDesc "Print a string in the server log."))
-  <> A.command "get"
+          (GetR <$> A.strArgument (A.metavar "KEY" <> A.help "Key to get")
+                <*> pure 0)) -- has to be changed
+        (A.progDesc "Get a value from the distributed key store."))
+  <> A.command "setr"
       (A.info
         (ServerCmd <$>
-          (Get <$> A.strArgument (A.metavar "KEY" <> A.help "Key to get")))
-        (A.progDesc "Get a value from the key store."))
-  <> A.command "set"
-      (A.info
-        (ServerCmd <$>
-          (Set <$> A.strArgument (A.metavar "KEY" <> A.help "Key to set")
-               <*> A.strArgument (A.metavar "VAL" <> A.help "Value to set")))
-        (A.progDesc "Set a value in the key store."))
+          (SetRVote <$> A.strArgument (A.metavar "KEY" <> A.help "Key to set")
+                    <*> A.strArgument (A.metavar "VAL" <> A.help "Value to set")
+                    <*> pure 0)) -- has to be changed
+        (A.progDesc "Set a value in the distributed key store."))
   <> A.command "query_all_keys"
       (A.info
         (pure $ ServerCmd QueryAllKeys)
@@ -119,7 +284,10 @@ optionsParser = Options
   <*> commandParser
 
 main :: IO ()
-main = A.execParser opts >>= run 1
+main = do
+    st <- initialState
+    opt <- A.execParser opts
+    run opt st
   where
     opts = A.info (A.helper <*> optionsParser)
       ( A.fullDesc

@@ -16,6 +16,7 @@ import qualified Data.Graph as G
 import Data.UnixTime
 import Data.List (intercalate)
 import Data.Maybe
+import Data.Hashable
 import qualified Data.Sequence.Queue as Q
 import Network.Socket hiding (recv)
 import Network.Socket.ByteString (recv, sendAll)
@@ -79,31 +80,33 @@ runCommand (i, cmd) st@MutState{..} sockAddr =
     Heartbeat uuid port -> do
       now <- getUnixTime
       returnAndLog $ atomically $ runWriterT $ do
-        get <- lift $ M.lookup uuid heartbeats
-        case get of
+        epoch' <- lift $ readTVar epoch
+        lift (M.lookup uuid heartbeats) >>= \case
           Just cond@ServerCondition{..} ->
             if isAlive now cond
               then do -- Normal heartbeat update
                 lift $ M.insert (cond {lastHeartbeatTime = now}) uuid heartbeats
                 logger $ green $ "Heartbeat received from " ++ port
-                return $ Executed i Ok
+                return $ HeartbeatResponse i Ok epoch'
               else do -- Expired server connection
                 logger $ red $ "Expired heartbeat received from " ++ port
                 cancelLocksAfterCrash now st
-                return $ Executed i Forbidden
+                return $ HeartbeatResponse i Forbidden epoch'
           Nothing -> do -- New server connection
             lift $ M.insert (ServerCondition now sockAddr True) uuid heartbeats
             lift $ modifyTVar' epoch (+1)
             logger $ green $ "New heartbeat received from " ++ port
-            return $ Executed i Ok
+            return $ HeartbeatResponse i Ok epoch'
     QueryServers -> do
       now <- getUnixTime
       returnAndLog $ atomically $ runWriterT $ do
-        addrs <- lift $ map (show . serverAddr) . filter (isAlive now) . map snd
+        -- addrs <- lift $ map (show . serverAddr) . filter (isAlive now) . map snd
+        --                 <$> ListT.toList (M.stream heartbeats)
+        pairs <- lift $ map (second (show . serverAddr)) . filter (isAlive now . snd)
                         <$> ListT.toList (M.stream heartbeats)
         epoch' <- lift $ readTVar epoch
         logger $ green "Active servers request"
-        return $ QueryServersResponse i epoch' addrs
+        return $ QueryServersResponse i epoch' pairs
     LockGet name cli ->
       returnAndLog $ atomically $ runWriterT $ do
         lift $ pushToQueueMap st name cli
