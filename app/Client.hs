@@ -110,7 +110,7 @@ run opt@Options{..} st@MutState{..} =
               Just _ -> return success -- we already got it successfully
               Nothing -> do
                 let (host, port) = addrStringPair addr
-                getResponse opt st cmd (Just host) (Just [port]) >>= \case
+                getResponse opt st (ServerCmd $ c {epochInput = viewEpoch}) (Just host) (Just [port]) >>= \case
                   Left _ -> return Nothing
                   Right res@GetResponse{..} ->
                     return $ Just res
@@ -126,7 +126,7 @@ run opt@Options{..} st@MutState{..} =
           let buckets = bucketAllocator k servers fst
           responsesM <- forM buckets $ \(uuidStr, addrStr) -> do
             let (host, port) = addrStringPair addrStr
-            getResponse opt st cmd (Just host) (Just [port]) -- Phase one request
+            getResponse opt st (ServerCmd $ c {epochInput = viewEpoch}) (Just host) (Just [port]) -- Phase one request
           let validResponses = rights responsesM
           if all isRight responsesM && all ((== Ok) . status) validResponses
           then do -- Finalize commit
@@ -134,7 +134,7 @@ run opt@Options{..} st@MutState{..} =
               case res of
                 SetResponseR i Ok ep commitId -> do
                   let (host, port) = addrStringPair addrStr
-                  getResponse opt st (ServerCmd (SetRCancel k commitId)) (Just host) (Just [port]) >>= \case
+                  getResponse opt st (ServerCmd (SetRCommit k commitId)) (Just host) (Just [port]) >>= \case
                     Right res@(Executed _ Ok) -> do
                       putStrLn $ green $ "Successfully finalized commit " ++ show commitId
                                  ++ " for the key \"" ++ k ++ "\" on " ++ addrStr

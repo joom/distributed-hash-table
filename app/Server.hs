@@ -72,7 +72,9 @@ runCommand (i, cmd) opt st@MutState{..} =
     GetR k epochInput -> do
       ep <- atomically $ readTVar epoch
       if ep /= epochInput
-      then return $ GetResponse i Forbidden ""
+      then do
+        putStrLn $ red $ show ep ++ " and " ++ show epochInput ++ " are different epochs"
+        return $ GetResponse i Forbidden ""
       else runCommand (i, Get k) opt st
     SetRVote k v epochInput -> returnAndLog $ runWriterT $ do -- Phase one
       ep <- lift $ atomically $ readTVar epoch
@@ -86,7 +88,7 @@ runCommand (i, cmd) opt st@MutState{..} =
           lift $ atomically $ do
             modifyTVar' nextCommitId (+1)
             M.insert (currentId, v) k keyCommit
-          logger $ red $ "Starting commit \"" ++ k ++ "\" to \"" ++ show (currentId, v)
+          logger $ yellow $ "Starting commit \"" ++ k ++ "\" to \"" ++ show (currentId, v)
           return $ SetResponseR i Ok ep currentId
     SetRCommit{..} -> returnAndLog $ runWriterT $ -- Phase two confirmation
       lift (atomically $ M.lookup k keyCommit) >>= \case
