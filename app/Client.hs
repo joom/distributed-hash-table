@@ -172,7 +172,7 @@ run opt@Options{..} st@MutState{..} =
                                  ++ " for key \"" ++ k ++ "\" on " ++ addrStr
                 _ -> putStrLn $ yellow $ "There is no commit to cancel for the key \"" ++ k
                                 ++ "\" on " ++ addrStr
-            die $ bgRed "Not all servers voted yes"
+            die $ bgRed "Commit failed"
     ServerCmd QueryAllKeys -> -- connects to all active servers and fetches all keys
       getServers opt st >>= \case
         Nothing -> die $ bgRed "Couldn't get active servers from view leader"

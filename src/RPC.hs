@@ -43,7 +43,7 @@ data ServerCommand =
 instance Serialize ServerCommand
 
 data ViewLeaderCommand =
-    Heartbeat UUIDString ServiceName -- ^ Takes the server's UUID and port.
+    Heartbeat UUIDString AddrString -- ^ Takes the server's UUID and port.
   | QueryServers
   | LockGet String UUIDString -- ^ Takes a lock name and a requester UUID.
   | LockRelease String UUIDString -- ^ Takes a lock name and a requester UUID.

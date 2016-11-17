@@ -35,7 +35,7 @@ import RPC.Socket
 data ServerCondition = ServerCondition
   { -- ^ Denotes the last valid heartbeat time. Late heartbeats will not update.
     lastHeartbeatTime :: UnixTime
-  , serverAddr        :: SockAddr
+  , addrString        :: AddrString
   , isActive          :: Bool
   }
 
@@ -77,7 +77,7 @@ runCommand :: (Int, ViewLeaderCommand) -- ^ A pair of the request ID and a comma
            -> IO Response
 runCommand (i, cmd) st@MutState{..} sockAddr =
   case cmd of
-    Heartbeat uuid port -> do
+    Heartbeat uuid addrStr -> do
       now <- getUnixTime
       returnAndLog $ atomically $ runWriterT $ do
         epoch' <- lift $ readTVar epoch
@@ -86,24 +86,21 @@ runCommand (i, cmd) st@MutState{..} sockAddr =
             if isAlive now cond
               then do -- Normal heartbeat update
                 lift $ M.insert (cond {lastHeartbeatTime = now}) uuid heartbeats
-                logger $ green $ "Heartbeat received from " ++ port
+                logger $ green $ "Heartbeat received from " ++ addrStr
                 return $ HeartbeatResponse i Ok epoch'
               else do -- Expired server connection
-                logger $ red $ "Expired heartbeat received from " ++ port
+                logger $ red $ "Expired heartbeat received from " ++ addrStr
                 cancelLocksAfterCrash now st
                 return $ HeartbeatResponse i Forbidden epoch'
           Nothing -> do -- New server connection
-            lift $ M.insert (ServerCondition now sockAddr True) uuid heartbeats
+            lift $ M.insert (ServerCondition now addrStr True) uuid heartbeats
             lift $ modifyTVar' epoch (+1)
-            logger $ green $ "New heartbeat received from " ++ port
+            logger $ green $ "New heartbeat received from " ++ addrStr
             return $ HeartbeatResponse i Ok epoch'
     QueryServers -> do
       now <- getUnixTime
       returnAndLog $ atomically $ runWriterT $ do
-        -- addrs <- lift $ map (show . serverAddr) . filter (isAlive now) . map snd
-        --                 <$> ListT.toList (M.stream heartbeats)
-        pairs <- lift $ map (second (show . serverAddr)) . filter (isAlive now . snd)
-                        <$> ListT.toList (M.stream heartbeats)
+        pairs <- lift $ map (second addrString) . filter (isAlive now . snd) <$> ListT.toList (M.stream heartbeats)
         epoch' <- lift $ readTVar epoch
         logger $ green "Active servers request"
         return $ QueryServersResponse i epoch' pairs
@@ -209,7 +206,7 @@ cancelLocksAfterCrash now st@MutState{..} = do
                    <$> ListT.toList (M.stream heartbeats)
     lockList <- lift $ lockHolders st
     forM_ hbList (\(uuid, cond@ServerCondition{..}) -> do
-      let portName = dropWhile (/= ':') (show serverAddr) -- will get something like ":38000"
+      let portName = dropWhile (/= ':') addrString -- will get something like ":38000"
       let lockNamesToDelete = map snd $ filter (\(reqId, _) -> reqId == portName) lockList
       unless (null lockNamesToDelete) $ do -- Remove locks
         logger $ red $ "Removing locks taken by inactive servers: "
