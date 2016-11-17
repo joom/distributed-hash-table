@@ -54,9 +54,9 @@ data RequestError =
 
 getResponse :: Options
             -> MutState
-            -> CommandTypes -- ^ The command to send.
-            -> Maybe HostName
-            -> Maybe [ServiceName] -- ^ The ports to try connecting.
+            -> CommandTypes -- ^ The command to send. Changes the default values for host and port.
+            -> Maybe HostName -- ^ The host to try to connect, overrides default if it is 'Just'.
+            -> Maybe [ServiceName] -- ^ The ports to try to connect, overrides default if it is 'Just'.
             -> IO (Either RequestError Response)
 getResponse opt@Options{..} st@MutState{..} cmd' host ports = do
     i <- atomically $ readTVar nextRequestId
@@ -78,8 +78,8 @@ getResponse opt@Options{..} st@MutState{..} cmd' host ports = do
         close sock
         return either
   where
-    pick  a b = case cmd of {ServerCmd _ -> a   ; ViewCmd _ -> b}
-    pick' f g = case cmd of {ServerCmd c -> f c ; ViewCmd c -> g c}
+    pick  a b = case cmd' of {ServerCmd _ -> a   ; ViewCmd _ -> b}
+    pick' f g = case cmd' of {ServerCmd c -> f c ; ViewCmd c -> g c}
 
 getServers :: Options -> MutState -> IO (Maybe (Int, [(UUIDString, String)]))
 getServers opt@Options{..} st@MutState{..} = do
@@ -173,33 +173,6 @@ run opt@Options{..} st@MutState{..} =
                 _ -> putStrLn $ yellow $ "There is no commit to cancel for the key \"" ++ k
                                 ++ "\" on " ++ addrStr
             die $ bgRed "Not all servers voted yes"
-
-          -- case sequence responsesM of
-          --   Left err -> die $ bgRed "Couldn't get a vote from a server in phase one of commit"
-          --   Right responses -> -- checking phase one responses
-              -- case forM responses (\case -- checking if everyone voted yes
-              --     SetResponseR i Ok ep -> if viewEpoch == ep then Just i else Nothing
-              --     SetResponseR i Forbidden ep -> Nothing
-              --     _ -> Nothing) of
-              --   Nothing -> do
-              --     cancelAll <- forM (zip undefined buckets) $ \(i, (uuidStr, addrStr)) -> do
-              --       let (host, port) = addrStringPair addrStr
-              --       getResponse opt st (SetRCancel k _) (Just host) (Just [port]) -- Phase two request to cancel
-              --     die $ bgRed "Not all servers voted yes"
-              --   Just is -> do
-              --     acknowledgmentsM <- forM (zip is buckets) $ \(i, (uuidStr, addrStr)) -> do
-              --       let (host, port) = addrStringPair addrStr
-              --       getResponse opt st (SetRCommit k i) (Just host) (Just [port]) -- Phase two request to confirm
-              --     case sequence acknowledgmentsM of
-              --       Left err ->
-              --         die $ red $ "Failed to set the key \"" ++ k ++ "\" to \""
-              --                    ++ v ++ "\" in the servers " ++ show (map snd buckets)
-              --                    ++ " because of " ++ show err
-              --       Right acknowledgments -> do
-              --         putStrLn $ green "Successfully set the key \"" ++ k ++ "\" to \""
-              --                    ++ v ++ "\" in the servers "  ++ show (map snd buckets)
-              --         exitSuccess
---
     ServerCmd QueryAllKeys -> -- connects to all active servers and fetches all keys
       getServers opt st >>= \case
         Nothing -> die $ bgRed "Couldn't get active servers from view leader"
@@ -221,11 +194,11 @@ run opt@Options{..} st@MutState{..} =
       getResponse opt st cmd Nothing Nothing >>= \case
         Left err -> die $ bgRed "View leader command failed because of " ++ show err
         Right c@(Executed _ Retry) -> do
-          print cmd
+          print c
           putStrLn $ yellow "Waiting for 5 sec"
           threadDelay 5000000 -- wait 5 sec
           run opt st
-        Right c -> print cmd >> exitSuccess
+        Right c -> print c >> exitSuccess
 
 -- | Parser for a ServerCommand, i.e. the procedures available in the system.
 commandParser :: Parser CommandTypes
