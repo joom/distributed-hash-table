@@ -1,6 +1,7 @@
 # rpc
 
-An implementation of distributed hash tables with distributed two-phase commit. The view leader can hold locks.
+An implementation of distributed hash tables with distributed two-phase commit.
+The view leader can hold locks.
 
 Written as a project for COMP360 Distributed Systems, Fall 2016, Prof. Jeff
 Epstein, Wesleyan University.
@@ -42,7 +43,12 @@ If a server fails to send a heartbeat for 30 seconds, but then later succeeds,
 it will be told by the view leader that it expired. In that case, the server
 terminates.
 
-### Lock cancelling after crash and deadlock detection
+### Locks and deadlock detection
+
+When there is a request for a lock that receives the retry message, that client
+is added to the queue for that lock. Even though the client stops asking, it will
+get the lock when the clients that are waiting in front of it in the queue get
+and release the lock.
 
 The view leader assumes that a server crashed if it sends no heartbeat for 30
 seconds.  In that case, if that server holds any locks (that have the requester

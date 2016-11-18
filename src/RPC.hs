@@ -84,8 +84,6 @@ data Response =
       { i :: Int , status :: Status , value :: String }
   | ExecutedR
       { i :: Int , status :: Status , epoch :: Epoch }
-  -- | GetResponseR
-  --     { i :: Int , status :: Status , value :: String , epoch :: Epoch }
   | SetResponseR
       { i :: Int , status :: Status , epoch :: Epoch , storedId :: CommitId  }
   | KeysResponse

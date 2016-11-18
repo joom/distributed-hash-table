@@ -105,7 +105,7 @@ run opt@Options{..} st@MutState{..} =
                 let (host, port) = addrStringPair addr
                 getResponse opt st (ServerCmd $ c {epochInput = viewEpoch}) (Just host) (Just [port]) >>= \case
                   Left _ -> return Nothing
-                  Right res@GetResponse{..} ->
+                  Right res@(GetResponse _ Ok _) ->
                     return $ Just res
                   Right _ -> return Nothing
             ) Nothing buckets
