@@ -11,6 +11,13 @@ import System.Console.Chalk
 
 import RPC
 
+data RequestError =
+    CouldNotConnect [ServiceName]
+  | SendingTimeout
+  | ReceivingTimeout
+  | InvalidResponse
+  deriving (Show)
+
 addrStringPair :: AddrString -> (HostName, ServiceName)
 addrStringPair = second tail . span (/= ':')
 

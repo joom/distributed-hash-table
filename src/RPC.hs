@@ -38,6 +38,7 @@ data ServerCommand =
   | SetRCommit { k :: String , commitId :: Int }
   | SetRCancel { k :: String , commitId :: Int }
   | QueryAllKeys
+  | Rebalance { kvs :: [(String, String)] , epochInput :: Epoch }
   deriving (Show, Eq, Generic)
 
 instance Serialize ServerCommand

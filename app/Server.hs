@@ -8,6 +8,8 @@ import Control.Concurrent.STM.TVar
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer.Strict
 import qualified STMContainers.Map as M
+import qualified STMContainers.Multimap as MM
+import qualified STMContainers.Set as Set
 import qualified ListT
 import Control.Exception
 import Network.Socket hiding (recv)
@@ -18,6 +20,9 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.Serialize as S
 import qualified Data.Aeson as JSON
 import Data.Hashable
+import Data.List
+import Data.Maybe
+import Data.Either
 import System.Console.Chalk
 import System.Timeout
 import System.Exit
@@ -32,22 +37,26 @@ data Options = Options
   , uuid           :: UUIDString
   } deriving (Show)
 
+type Bucket = (UUIDString, AddrString)
+
 -- | A type for mutable state.
 data MutState = MutState
   { keyStore      :: M.Map String String
   -- ^ A map to keep track of what we are committed on.
+  -- Holds a pair of commit id and a key.
   , keyCommit     :: M.Map String (CommitId, String)
   , nextCommitId  :: TVar CommitId
+  , nextRequestId :: TVar Int
   , heartbeats    :: TVar Int
   -- ^ Keeps track of the epoch in the view leader.
   , epoch         :: TVar Int
   -- ^ Keeps track of the most recent active servers list, so that we don't
   -- have to make a request to the view leader every time we make a request.
-  , activeServers :: TVar [(UUIDString, AddrString)]
+  , activeServers :: TVar [Bucket]
   }
 
 initialState :: IO MutState
-initialState = MutState <$> M.newIO <*> M.newIO <*> newTVarIO 0
+initialState = MutState <$> M.newIO <*> M.newIO <*> newTVarIO 0 <*> newTVarIO 0
                         <*> newTVarIO 0 <*> newTVarIO 0 <*> newTVarIO []
 
 -- | Runs the command with side effects and returns the response that is to be
@@ -124,10 +133,11 @@ runCommand (i, cmd) opt st@MutState{..} =
       kvs <- lift $ atomically $ ListT.toList $ M.stream keyStore
       logger $ green "Returned all keys"
       return $ KeysResponse i Ok (map fst kvs)
-
-    -- _ -> returnAndLog $ runWriterT $ do
-    --   logger $ bgRed "Unimplemented command on the server side"
-    --   return $ Executed i NotFound
+    Rebalance kvs epochInput -> do
+      putStrLn $ magenta "Rebalancing request for keys and values " ++ show kvs
+      atomically $ forM_ kvs $ \kv@(k, v) ->
+        M.insert v k keyStore
+      return $ Executed i Ok
 
 -- | Receives messages, decodes and runs the content if necessary, and returns
 -- the response. Should be run after you accepted a connection.
@@ -189,21 +199,112 @@ updateActiveServers opt@Options{..} st@MutState{..} = do
       close sock
       case JSON.decode (BL.fromStrict r) of
         Just (QueryServersResponse _ newEpoch newActiveServers) -> do
-          atomically $ do
+          oldActiveServers <- atomically $ do
             writeTVar epoch newEpoch
-            writeTVar activeServers newActiveServers
+            swapTVar activeServers newActiveServers
           putStrLn $ green "Current list of active servers updated"
-          rebalanceKeys opt st
+          rebalanceKeys opt st oldActiveServers
         Just _ ->
           putStrLn $ bgRed "Wrong kind of response for query servers"
         Nothing ->
           putStrLn $ bgRed "Couldn't parse query servers response"
 
-rebalanceKeys :: Options -> MutState -> IO ()
-rebalanceKeys Options{..} MutState{..} = do
+type KV = (String, String)
+
+-- ^ This can be written as a pure function.
+collectUnderBuckets :: [(KV, [Bucket])] -> STM [(Bucket, [KV])]
+collectUnderBuckets pairs = do
+  bucketToKVMap <- MM.new :: STM (MM.Multimap Bucket KV)
+  forM_ pairs $ \(kv, newBuckets) ->
+    forM_ newBuckets $ \bucket -> MM.insert kv bucket bucketToKVMap
+  buckets <- ListT.toList (MM.streamKeys bucketToKVMap)
+  bucketsWithKVSets <- mapM (\bucket -> (,) <$> pure bucket <*>
+                          (fromJust <$> MM.lookupByKey bucket bucketToKVMap)) buckets
+  MM.deleteAll bucketToKVMap
+  mapM (\(bucket, kvSet) ->
+      (,) <$> pure bucket <*> ListT.toList (Set.stream kvSet)
+    ) bucketsWithKVSets
+
+rebalanceKeys :: Options -> MutState -> [Bucket] -> IO ()
+rebalanceKeys opt@Options{..} st@MutState{..} oldActiveServers = do
   putStrLn "Starting rebalancing keys"
-  -- TODO
-  -- keyPairs <- atomically $ undefined
+  ep <- atomically $ readTVar epoch
+  newActiveServers <- atomically $ readTVar activeServers
+  let removedServers = oldActiveServers \\ newActiveServers
+  let addedServers   = newActiveServers \\ oldActiveServers
+  -- If a server is removed
+  forM_ removedServers $ \server@(uuidStr, addrStr) -> do
+    -- If some servers are removed, then each server will check if the keys
+    -- they currently hold used to reside in one of the servers that are
+    -- removed.  If that's the case, then it will make a request to another
+    -- server to save the data.
+    putStrLn $ blue $ "Rebalancing for removed server " ++ addrStr
+    kvs <- atomically $ ListT.toList $ M.stream keyStore
+    let toCopy = mapMaybe (\kv@(k, v) ->
+          let oldBuckets = bucketAllocator k oldActiveServers fst in
+          let newBuckets = bucketAllocator k newActiveServers fst in
+          if null (oldBuckets `intersect` removedServers) then Nothing
+          else Just (kv, newBuckets \\ oldBuckets)
+          ) kvs
+    bucketsWithKVs <- atomically $ collectUnderBuckets toCopy
+    forM_ bucketsWithKVs $ \((uuidStr, addrStr), kvs) -> do
+      let (host, port) = addrStringPair addrStr
+      getResponse opt st (Rebalance kvs ep) host [port] >>= \case
+        Left err ->
+          putStrLn $ red $ "Rebalancing request failed for " ++ addrStr
+        Right (Executed _ Ok) ->
+          putStrLn $ green $ "Rebalancing complete for " ++ addrStr
+        Right _ ->
+          putStrLn $ red $ "Incorrect rebalancing response from " ++ addrStr
+  -- If a server is added
+  forM_ addedServers $ \server@(uuidStr, addrStr)-> do
+    -- When there are new servers, each server will check what keys they have.
+    -- If a server has a key that should reside in a different server now,
+    -- it will make a request to that different server and then delete
+    -- that key from itself.
+    putStrLn $ blue $ "Rebalancing for added server " ++ addrStr
+    kvs <- atomically $ ListT.toList $ M.stream keyStore
+    let unnecessary = mapMaybe (\kv@(k, v) ->
+          let buckets = bucketAllocator k newActiveServers fst in
+          if server `elem` buckets then Nothing
+          else Just (kv, buckets `intersect` addedServers)
+          ) kvs
+    bucketsWithKVs <- atomically $ collectUnderBuckets unnecessary
+    forM_ bucketsWithKVs $ \((uuidStr, addrStr), kvs) -> do
+      let (host, port) = addrStringPair addrStr
+      getResponse opt st (Rebalance kvs ep) host [port] >>= \case
+        Left err ->
+          putStrLn $ red $ "Rebalancing request failed for " ++ addrStr
+        Right (Executed _ Ok) -> do
+          -- The keys are stored in a new server now, their copies in
+          -- this servers should be deleted
+          atomically $ forM_ kvs $ \(k, _) -> M.delete k keyStore
+          putStrLn $ green $ "Rebalancing complete for " ++ addrStr
+        Right _ ->
+          putStrLn $ red $ "Incorrect rebalancing response from " ++ addrStr
+
+getResponse :: Options
+            -> MutState
+            -> ServerCommand -- ^ The command to send. Changes the default values for host and port.
+            -> HostName -- ^ The host to try to connect.
+            -> [ServiceName] -- ^ The ports to try to connect.
+            -> IO (Either RequestError Response)
+getResponse opt@Options{..} st@MutState{..} c host ports = do
+    i <- atomically $ readTVar nextRequestId
+    atomically $ modifyTVar' nextRequestId (+1)
+    attempt <- findAndConnectOpenPort host ports
+    case attempt of
+      Nothing -> return $ Left $ CouldNotConnect ports
+      Just (sock, sockAddr) -> do
+        either <- timeoutAct
+          (sendWithLen sock $ S.encode (i, c))
+          (return $ Left SendingTimeout) $ \() ->
+            timeoutAct (recvWithLen sock) (return $ Left ReceivingTimeout) $ \r ->
+              case JSON.decode (BL.fromStrict r) :: Maybe Response of
+                Just res -> return $ Right res
+                _ -> return $ Left InvalidResponse
+        close sock
+        return either
 
 -- | The main loop that keeps accepting more connections.
 loop :: Socket -> Options -> MutState -> IO ()

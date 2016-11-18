@@ -45,13 +45,6 @@ data Options = Options
   , cmd            :: CommandTypes
   } deriving (Show)
 
-data RequestError =
-    CouldNotConnect [ServiceName]
-  | SendingTimeout
-  | ReceivingTimeout
-  | InvalidResponse
-  deriving (Show)
-
 getResponse :: Options
             -> MutState
             -> CommandTypes -- ^ The command to send. Changes the default values for host and port.
