@@ -227,9 +227,11 @@ collectUnderBuckets pairs = do
 
 rebalanceKeys :: Options -> MutState -> [Bucket] -> IO ()
 rebalanceKeys opt@Options{..} st@MutState{..} oldActiveServers = do
-  putStrLn "Starting rebalancing keys"
+  putStrLn $ cyan "Starting rebalancing keys"
   ep <- atomically $ readTVar epoch
   newActiveServers <- atomically $ readTVar activeServers
+  putStrLn $ cyan $ "Old servers: " ++ show oldActiveServers
+  putStrLn $ cyan $ "New servers: " ++ show newActiveServers
   let removedServers = oldActiveServers \\ newActiveServers
   let addedServers   = newActiveServers \\ oldActiveServers
   -- If a server is removed

@@ -1,6 +1,6 @@
 # rpc
 
-A remote procedure call implementation with locks and a view leader.
+An implementation of distributed hash tables with distributed two-phase commit. The view leader can hold locks.
 
 Written as a project for COMP360 Distributed Systems, Fall 2016, Prof. Jeff
 Epstein, Wesleyan University.
@@ -17,69 +17,14 @@ is probably in your path variable.
 
 You can run the server without any command line arguments: `rpc-server`.
 
-Running the client is a bit more complicated, there are 7 kinds of procedures
-you can call. Here's an example of each (and more):
-
-```
-~$ rpc-client print "side effects yay!"
-Connected to localhost:38000
-{"status":"ok","tag":"Executed","i":1}
-
-~$ rpc-client set "lang" "русски"
-Connected to localhost:38000
-{"status":"ok","tag":"Executed","i":1}
-
-~$ rpc-client get "lang"
-Connected to localhost:38000
-{"status":"ok","tag":"GetResponse","value":"русски","i":1}
-
-~$ rpc-client get "timezone"
-Connected to localhost:38000
-{"status":"not_found","tag":"GetResponse","value":"","i":1}
-
-~$ rpc-client query_all_keys
-Connected to localhost:38000
-{"status":"ok","tag":"KeysResponse","keys":["lang"],"i":1}
-
-~$ rpc-client query_servers
-Connected to localhost:39000
-{"tag":"QueryServersResponse","result":["127.0.0.1:54945"],"epoch":1,"i":1}
-
-~$ rpc-client lock_get "jane" "user1"
-Connected to localhost:39000
-{"status":"granted","tag":"Executed","i":1}
-
-~$ rpc-client lock_get "jack" "user2"
-Connected to localhost:39000
-{"status":"granted","tag":"Executed","i":1}
-
-~$ rpc-client lock_release "jane" "user2"
-Connected to localhost:39000
-{"status":"forbidden","tag":"Executed","i":1}
-
-~$ rpc-client lock_release "jane" "user1"
-Connected to localhost:39000
-{"status":"ok","tag":"Executed","i":1}
-
-~$ rpc-client lock_get "jack" "user1"
-Connected to localhost:39000
-{"status":"retry","tag":"Executed","i":1}
-Waiting for 5 sec
-Connected to localhost:39000
-{"status":"retry","tag":"Executed","i":2}
-Waiting for 5 sec
-...
-```
-
-You can ignore the `tag` field in the response, but it is kept for now since it
-makes the `FromJSON Response` instance easier.
+For `rpc-client` and `rpc-view-leader`, you can see all the options using the `--help` flag.
 
 The executable  `rpc-client` take optional arguments `--server` (or `-s`) and
 `--viewleader` (or `-l`) that specifies which host to connect , such a call
 would be of the form
 
 ```
-rpc-client --server 127.0.0.1 set "lang" "Türkçe"
+rpc-client --server 127.0.0.1 setr "lang" "Türkçe"
 ```
 
 The executable `rpc-server` also takes the `--viewleader` optional argument, to
@@ -111,3 +56,24 @@ repeatedly logs the same deadlock information as long as it keeps getting the
 request. Since the client keeps retrying by default, it will not stop logging
 the deadlock unless the client is stopped. If a requester ID is used for
 multiple lock requests at the same time, this can cause some weird behavior.
+
+### Bucket allocator
+
+We assume that our hash function evenly distributes strings to integers. We
+take the UUID of every server to be the string for its hash, i.e. the hash
+value of the server. Therefore we assume that our servers more or less evenly
+split the number of keys we want to hold. The primary bucket to hold a key is
+the bucket that has the server that has the lowest hash value that still is
+strictly greater than the hash of the key string. We hold 2 more replicas as
+backup, in servers that have the next 2 lowest hash value.
+
+### Rebalancing
+
+If some servers are removed, then each server will check if the keys they
+currently hold used to reside in one of the servers that are removed.  If
+that's the case, then it will make a request to the new server that is suppose
+to hold the data, to save the data.
+
+When there are new servers, each server will check what keys they have.  If a
+server has a key that should reside in a different server now, it will make a
+request to that different server and then delete that key from itself.
