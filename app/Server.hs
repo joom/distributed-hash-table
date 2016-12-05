@@ -232,54 +232,50 @@ rebalanceKeys :: Options
               -> [Bucket] -- ^ Old version of active servers before update.
               -> IO ()
 rebalanceKeys opt@Options{..} st@MutState{..} oldActiveServers = do
-  putStrLn $ cyan "Starting rebalancing keys"
-  ep <- atomically $ readTVar epoch
-  newActiveServers <- atomically $ readTVar activeServers
-  let removedServers = oldActiveServers \\ newActiveServers
-  let addedServers   = newActiveServers \\ oldActiveServers
-  putStrLn $ cyan $ "Removed servers: " ++ show removedServers
-  putStrLn $ cyan $ "Added servers: " ++ show addedServers
-  kvs <- atomically $ ListT.toList $ M.stream keyStore
-  -- When a server is removed and we have to copy some keys to another server
-  let toCopy = mapMaybe (\kv@(k, v) ->
-        let oldBuckets = bucketAllocator k oldActiveServers fst in
-        let newBuckets = bucketAllocator k newActiveServers fst in
-        if null (oldBuckets `intersect` removedServers) then Nothing
-        else Just (kv, newBuckets \\ oldBuckets)
-        ) kvs
-  toCopyBuckets <- atomically $ collectUnderBuckets toCopy
-  putStrLn $ cyan $ "To copy buckets: " ++ show toCopyBuckets
-  forM_ toCopyBuckets $ \((uuidStr, addrStr), kvs) -> do
-    let (host, port) = addrStringPair addrStr
-    getResponse opt st (Rebalance kvs ep) host [port] >>= \case
-      Left err ->
-        putStrLn $ red $ "Rebalancing request failed for " ++ addrStr
-      Right (Executed _ Ok) ->
-        putStrLn $ green $ "Rebalancing complete for " ++ addrStr
-      Right _ ->
-        putStrLn $ red $ "Incorrect rebalancing response from " ++ addrStr
-
-  -- When a server is added and we have to move some keys to another server
-  let unnecessaryKeys = mapMaybe (\kv@(k, v) ->
-        let oldBuckets = bucketAllocator k oldActiveServers fst in
-        let newBuckets = bucketAllocator k newActiveServers fst in
-        if null (newBuckets `intersect` addedServers) then Nothing
-        else Just (kv, newBuckets \\ oldBuckets)
-        ) kvs
-  unnecessaryKeysBuckets <- atomically $ collectUnderBuckets unnecessaryKeys
-  putStrLn $ cyan $ "Unnecessary keys buckets: " ++ show unnecessaryKeysBuckets
-  forM_ unnecessaryKeysBuckets $ \((uuidStr, addrStr), kvs) -> do
-    let (host, port) = addrStringPair addrStr
-    getResponse opt st (Rebalance kvs ep) host [port] >>= \case
-      Left err ->
-        putStrLn $ red $ "Rebalancing request failed for " ++ addrStr
-      Right (Executed _ Ok) -> do
-        -- The keys are stored in a new server now, their copies in
-        -- this servers should be deleted
-        atomically $ forM_ kvs $ \(k, _) -> M.delete k keyStore
-        putStrLn $ green $ "Rebalancing complete for " ++ addrStr
-      Right _ ->
-        putStrLn $ red $ "Incorrect rebalancing response from " ++ addrStr
+    putStrLn $ cyan "Starting rebalancing keys"
+    ep <- atomically $ readTVar epoch
+    newActiveServers <- atomically $ readTVar activeServers
+    let removedServers = oldActiveServers \\ newActiveServers
+    let addedServers   = newActiveServers \\ oldActiveServers
+    putStrLn $ cyan $ "Removed servers: " ++ show removedServers
+    putStrLn $ cyan $ "Added servers: " ++ show addedServers
+    kvs <- atomically $ ListT.toList $ M.stream keyStore
+    -- When a server is removed and we have to copy some keys to another server
+    let toCopy = mapMaybe (\kv@(k, v) ->
+          let oldBuckets = bucketAllocator k oldActiveServers fst in
+          let newBuckets = bucketAllocator k newActiveServers fst in
+          if null (oldBuckets `intersect` removedServers) then Nothing
+          else Just (kv, newBuckets \\ oldBuckets)
+          ) kvs
+    -- When a server is added and we have to move some keys to another server
+    let unnecessaryKeys = mapMaybe (\kv@(k, v) ->
+          let oldBuckets = bucketAllocator k oldActiveServers fst in
+          let newBuckets = bucketAllocator k newActiveServers fst in
+          if null (newBuckets `intersect` addedServers) then Nothing
+          else Just (kv, newBuckets \\ oldBuckets)
+          ) kvs
+    toCopyBuckets <- atomically $ collectUnderBuckets toCopy
+    unnecessaryKeysBuckets <- atomically $ collectUnderBuckets unnecessaryKeys
+    putStrLn $ cyan $ "To copy buckets: " ++ show toCopyBuckets
+    putStrLn $ cyan $ "Unnecessary keys buckets: " ++ show unnecessaryKeysBuckets
+    makeRequests False ep toCopyBuckets
+    makeRequests True ep unnecessaryKeysBuckets
+  where
+    -- For unnecessary ones, the keys are stored in a new server now, their
+    -- copies in this servers should be deleted
+    makeRequests :: Bool -> Epoch -> [(Bucket, [KV])] -> IO ()
+    makeRequests shouldDelete ep l =
+      forM_ l $ \((uuidStr, addrStr), kvs) -> do
+        let (host, port) = addrStringPair addrStr
+        getResponse opt st (Rebalance kvs ep) host [port] >>= \case
+          Left err ->
+            putStrLn $ red $ "Rebalancing request failed for " ++ addrStr
+          Right (Executed _ Ok) -> do
+            when shouldDelete $
+              atomically $ forM_ kvs $ \(k, _) -> M.delete k keyStore
+            putStrLn $ green $ "Rebalancing complete for " ++ addrStr
+          Right _ ->
+            putStrLn $ red $ "Incorrect rebalancing response from " ++ addrStr
 
 getResponse :: Options
             -> MutState
