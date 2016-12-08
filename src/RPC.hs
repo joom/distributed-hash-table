@@ -30,6 +30,8 @@ type UUIDString = String
 type AddrString = String -- of the format "localhost:8000"
 type Epoch = Int
 type CommitId = Int
+type ProposalNumber = Int
+type AsLeader = Bool
 
 data ServerCommand =
     Get { k :: String }
@@ -44,10 +46,13 @@ data ServerCommand =
 instance Serialize ServerCommand
 
 data ViewLeaderCommand =
-    Heartbeat UUIDString AddrString -- ^ Takes the server's UUID and port.
+    Heartbeat UUIDString AddrString AsLeader -- ^ Takes the server's UUID and port.
   | QueryServers
-  | LockGet String UUIDString -- ^ Takes a lock name and a requester UUID.
-  | LockRelease String UUIDString -- ^ Takes a lock name and a requester UUID.
+  | LockGet String UUIDString AsLeader -- ^ Takes a lock name and a requester UUID.
+  | LockRelease String UUIDString AsLeader -- ^ Takes a lock name and a requester UUID.
+  | ConsensusPrepare ProposalNumber ViewLeaderCommand
+  | ConsensusAccept ProposalNumber [ViewLeaderCommand]
+  | ConsensusReject ProposalNumber
   deriving (Show, Eq, Generic)
 
 instance Serialize ViewLeaderCommand
@@ -58,6 +63,7 @@ data Status =
   | Retry
   | Granted
   | Forbidden
+  | NoQuorum
   deriving (Show, Eq)
 
 instance ToJSON Status where
@@ -67,6 +73,7 @@ instance ToJSON Status where
     Retry     -> "retry"
     Granted   -> "granted"
     Forbidden -> "forbidden"
+    NoQuorum  -> "no_quorum"
 
 instance FromJSON Status where
   parseJSON s = case s of
@@ -75,6 +82,7 @@ instance FromJSON Status where
     String "retry"     -> pure Retry
     String "granted"   -> pure Granted
     String "forbidden" -> pure Forbidden
+    String "no_quorum" -> pure NoQuorum
     _                  -> mempty
 
 data Response =
@@ -92,10 +100,16 @@ data Response =
       { i :: Int , epoch :: Epoch , result :: [(UUIDString, AddrString)] }
   | HeartbeatResponse
       { i :: Int , status :: Status , epoch :: Epoch }
+  | ConsensusPrepareResponse
+      { i :: Int , status :: Status , missing :: Int }
+  | ConsensusReplicaAheadResponse
+      { i :: Int , missingLogs :: [ViewLeaderCommand] }
   deriving (Show, Eq, Generic)
 
 instance ToJSON Response
 instance FromJSON Response
+instance ToJSON ViewLeaderCommand
+instance FromJSON ViewLeaderCommand
 
 newUUID :: IO UUIDString
 newUUID = Data.UUID.toString <$> randomIO

@@ -1,5 +1,6 @@
 module RPC.Socket where
 
+import Network.BSD (getHostName)
 import Network.Socket hiding (recv)
 import Network.Socket.ByteString (recv, sendAll)
 import qualified Data.ByteString.Char8 as B
@@ -12,7 +13,7 @@ import System.Console.Chalk
 import RPC
 
 data RequestError =
-    CouldNotConnect [ServiceName]
+    CouldNotConnect [AddrString]
   | SendingTimeout
   | ReceivingTimeout
   | InvalidResponse
@@ -20,6 +21,16 @@ data RequestError =
 
 addrStringPair :: AddrString -> (HostName, ServiceName)
 addrStringPair = second tail . span (/= ':')
+
+defaultViews :: IO [AddrString]
+defaultViews = do
+  local <- getHostName
+  return $ map ((local ++) . (':' :) . show) [39000..39002]
+
+defaultViews' :: IO (HostName, [ServiceName])
+defaultViews' = do
+  local <- getHostName
+  return (local, map show [39000..39002])
 
 -- Abstractions to deal with sockets and sending the length first.
 
@@ -96,13 +107,14 @@ getClientSocket host serv = do
     sock <- socket (addrFamily serverAddr) Stream defaultProtocol
     return (sock, addrAddress serverAddr)
 
--- | Tries to connect to one of the given ports.
+-- | Tries to connect to one of the given addresses.
 -- Returns Nothing if they all fail. Has side effect of printing log messages.
-findAndConnectOpenPort :: HostName -> [ServiceName] -> IO (Maybe (Socket, SockAddr))
-findAndConnectOpenPort host = foldM (\success port ->
+findAndConnectOpenAddr :: [AddrString] -> IO (Maybe (Socket, SockAddr))
+findAndConnectOpenAddr = foldM (\success addr ->
     case success of
       Just _ -> return success -- we already have a successful conn, don't try
       _ -> do
+        let (host, port) = addrStringPair addr
         (sock, sockAddr) <- getClientSocket host port
         attempt <- timeout 10000000 (try (connect sock sockAddr))
         case (attempt :: Maybe (Either IOException ())) of

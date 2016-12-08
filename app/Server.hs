@@ -1,6 +1,7 @@
 {-# LANGUAGE RecordWildCards, LambdaCase #-}
 module Server where
 
+import Control.Arrow (second)
 import Control.Concurrent
 import Control.Monad
 import Control.Monad.STM
@@ -33,31 +34,35 @@ import RPC
 import RPC.Socket
 
 data Options = Options
-  { viewLeaderAddr :: HostName
-  , uuid           :: UUIDString
+  { viewAddrs :: [AddrString]
+  , uuid      :: UUIDString
   } deriving (Show)
+
+sortedView :: Options -> [AddrString]
+sortedView Options{..} = sortBy (flip compare) viewAddrs
 
 type Bucket = (UUIDString, AddrString)
 
 -- | A type for mutable state.
 data MutState = MutState
-  { keyStore      :: M.Map String String
+  { keyStore       :: M.Map String String
   -- ^ A map to keep track of what we are committed on.
   -- Holds a pair of commit id and a key.
-  , keyCommit     :: M.Map String (CommitId, String)
-  , nextCommitId  :: TVar CommitId
-  , nextRequestId :: TVar Int
-  , heartbeats    :: TVar Int
+  , keyCommit      :: M.Map String (CommitId, String)
+  , nextCommitId   :: TVar CommitId
+  , nextRequestId  :: TVar Int
+  , heartbeats     :: TVar Int
   -- ^ Keeps track of the epoch in the view leader.
-  , epoch         :: TVar Int
+  , epoch          :: TVar Int
   -- ^ Keeps track of the most recent active servers list, so that we don't
   -- have to make a request to the view leader every time we make a request.
-  , activeServers :: TVar [Bucket]
+  , activeServers  :: TVar [Bucket]
   }
 
-initialState :: IO MutState
-initialState = MutState <$> M.newIO <*> M.newIO <*> newTVarIO 0 <*> newTVarIO 0
-                        <*> newTVarIO 0 <*> newTVarIO 0 <*> newTVarIO []
+initialState :: Options -> IO MutState
+initialState Options{..} =
+  MutState <$> M.newIO <*> M.newIO <*> newTVarIO 0 <*> newTVarIO 0 <*>
+    newTVarIO 0 <*> newTVarIO 0 <*> newTVarIO []
 
 -- | Runs the command with side effects and returns the response that is to be
 -- sent back to the client.
@@ -160,12 +165,13 @@ sendHeartbeat :: Options -- ^ Command line options.
               -> IO ()
 sendHeartbeat opt@Options{..} st@MutState{..} addrStr = do
   i <- atomically $ modifyTVar' heartbeats (+1) >> readTVar heartbeats
-  findAndConnectOpenPort viewLeaderAddr (map show [39000..39010])  >>= \case
+  let addrs = sortedView opt
+  findAndConnectOpenAddr addrs >>= \case
     Nothing ->
-      die $ bgRed $ "Heartbeat: Couldn't connect to ports 39000 to 39010 on " ++ viewLeaderAddr
+      die $ bgRed $ "Heartbeat: Couldn't connect to " ++ show addrs
     Just (sock, sockAddr) -> do
       timeoutDie
-        (sendWithLen sock (S.encode (i, Heartbeat uuid addrStr)))
+        (sendWithLen sock (S.encode (i, Heartbeat uuid addrStr True)))
         (red "Timeout error when sending heartbeat request")
       r <- timeoutDie (recvWithLen sock)
              (red "Timeout error when receiving heartbeat response")
@@ -185,11 +191,11 @@ sendHeartbeat opt@Options{..} st@MutState{..} addrStr = do
 updateActiveServers :: Options -> MutState -> IO ()
 updateActiveServers opt@Options{..} st@MutState{..} = do
   putStrLn $ yellow "Updating active servers list"
-  attempt <- findAndConnectOpenPort viewLeaderAddr $ map show [39000..39010]
   i <- atomically $ readTVar heartbeats
-  case attempt of
+  let addrs = sortedView opt
+  findAndConnectOpenAddr addrs >>= \case
     Nothing ->
-      die $ bgRed $ "Active servers: Couldn't connect to ports 39000 to 39010 on " ++ viewLeaderAddr
+      die $ bgRed $ "Active servers: Couldn't connect to " ++ show addrs
     Just (sock, sockAddr) -> do
       timeoutDie
         (sendWithLen sock (S.encode (i, QueryServers)))
@@ -266,8 +272,7 @@ rebalanceKeys opt@Options{..} st@MutState{..} oldActiveServers = do
     makeRequests :: Bool -> Epoch -> [(Bucket, [KV])] -> IO ()
     makeRequests shouldDelete ep l =
       forM_ l $ \((uuidStr, addrStr), kvs) -> do
-        let (host, port) = addrStringPair addrStr
-        getResponse opt st (Rebalance kvs ep) host [port] >>= \case
+        getResponse opt st (Rebalance kvs ep) [addrStr] >>= \case
           Left err ->
             putStrLn $ red $ "Rebalancing request failed for " ++ addrStr
           Right (Executed _ Ok) -> do
@@ -280,15 +285,13 @@ rebalanceKeys opt@Options{..} st@MutState{..} oldActiveServers = do
 getResponse :: Options
             -> MutState
             -> ServerCommand -- ^ The command to send. Changes the default values for host and port.
-            -> HostName -- ^ The host to try to connect.
-            -> [ServiceName] -- ^ The ports to try to connect.
+            -> [AddrString]
             -> IO (Either RequestError Response)
-getResponse opt@Options{..} st@MutState{..} c host ports = do
+getResponse opt@Options{..} st@MutState{..} c addrs = do
     i <- atomically $ readTVar nextRequestId
     atomically $ modifyTVar' nextRequestId (+1)
-    attempt <- findAndConnectOpenPort host ports
-    case attempt of
-      Nothing -> return $ Left $ CouldNotConnect ports
+    findAndConnectOpenAddr addrs >>= \case
+      Nothing -> return $ Left $ CouldNotConnect addrs
       Just (sock, sockAddr) -> do
         either <- timeoutAct
           (sendWithLen sock $ S.encode (i, c))
@@ -308,14 +311,16 @@ loop sock opt st = do
   loop sock opt st
 
 run :: Options -> IO ()
-run optUser = do
+run optUser@Options{..} = do
+    -- Finish setting up the options
     uuidStr <- newUUID
     let opt = optUser {uuid = uuidStr}
+    -- Options finished. Now do the actual work.
     attempt <- findAndListenOpenPort $ map show [38000..38010]
     case attempt of
       Nothing -> die $ bgRed "Couldn't bind ports 38000 to 38010"
       Just (sock, sockAddr) -> do
-        st <- initialState
+        st <- initialState opt
         let addrStr = show sockAddr
         _ <- forkIO $ sendHeartbeat opt st addrStr -- the initial heartbeat
         setInterval (sendHeartbeat opt st addrStr >> pure True) 5000000 -- every 5 sec
@@ -325,12 +330,11 @@ run optUser = do
 -- | Parser for the optional parameters of the client.
 optionsParser :: Parser Options
 optionsParser = Options
-  <$> A.strOption
+  <$> A.many (A.strOption
       ( A.long "viewleader"
      <> A.short 'l'
      <> A.metavar "VIEWLEADERADDR"
-     <> A.help "Address of the view leader to connect"
-     <> A.value "localhost" )
+     <> A.help "One address of a view replica to connect"))
   <*> pure "" -- This must be replaced in the run function later
 
 main :: IO ()

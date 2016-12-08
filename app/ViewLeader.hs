@@ -18,6 +18,7 @@ import Data.List (intercalate)
 import Data.Maybe
 import Data.Hashable
 import qualified Data.Sequence.Queue as Q
+import Network.BSD (getHostName)
 import Network.Socket hiding (recv)
 import Network.Socket.ByteString (recv, sendAll)
 import qualified Network.Socket.ByteString as L
@@ -28,9 +29,16 @@ import qualified Data.Aeson as JSON
 import System.Console.Chalk
 import System.Timeout
 import System.Exit
+import qualified Options.Applicative as A
+import Options.Applicative (Parser, (<>))
 
 import RPC
 import RPC.Socket
+
+data Options = Options
+  { viewAddrs   :: [AddrString]
+  , currentAddr :: AddrString
+  }
 
 data ServerCondition = ServerCondition
   { -- ^ Denotes the last valid heartbeat time. Late heartbeats will not update.
@@ -38,6 +46,8 @@ data ServerCondition = ServerCondition
   , addrString        :: AddrString
   , isActive          :: Bool
   }
+
+-- data ElectionState
 
 isAlive :: UnixTime -- ^ Now
          -> ServerCondition
@@ -64,39 +74,48 @@ data MutState = MutState
   -- unique names. This will later be used to construct a graph to detect a
   -- deadlock.
   , lockMap :: M.Map LockName (Q.Queue ClientId)
+  -- ^ New commands are added to the beginning in the command log.
+  , log :: TVar [ViewLeaderCommand]
+  -- ^ If there is an existing promise
+  , prepared :: TVar (Maybe (ProposalNumber, ViewLeaderCommand))
+  , nextRequestId  :: TVar Int
   }
 
 initialState :: IO MutState
 initialState = MutState <$> M.newIO <*> newTVarIO 0 <*> M.newIO
+                        <*> newTVarIO [] <*> newTVarIO Nothing <*> newTVarIO 0
 
 -- | Runs the command with side effects and returns the response that is to be
 -- sent back to the client.
-runCommand :: (Int, ViewLeaderCommand) -- ^ A pair of the request ID and a command.
+runCommand :: Options
            -> MutState -- ^ A reference to the mutable state.
-           -> SockAddr -- ^ Socket address of the client making the request.
+           -> (Int, ViewLeaderCommand) -- ^ A pair of the request ID and a command.
            -> IO Response
-runCommand (i, cmd) st@MutState{..} sockAddr =
+runCommand opt@Options{..} st@MutState{..} (i, cmd) =
   case cmd of
-    Heartbeat uuid addrStr -> do
-      now <- getUnixTime
-      returnAndLog $ atomically $ runWriterT $ do
-        epoch' <- lift $ readTVar epoch
-        lift (M.lookup uuid heartbeats) >>= \case
-          Just cond@ServerCondition{..} ->
-            if isAlive now cond
-              then do -- Normal heartbeat update
-                lift $ M.insert (cond {lastHeartbeatTime = now}) uuid heartbeats
-                logger $ green $ "Heartbeat received from " ++ addrStr
-                return $ HeartbeatResponse i Ok epoch'
-              else do -- Expired server connection
-                logger $ red $ "Expired heartbeat received from " ++ addrStr
-                cancelLocksAfterCrash now st
-                return $ HeartbeatResponse i Forbidden epoch'
-          Nothing -> do -- New server connection
-            lift $ M.insert (ServerCondition now addrStr True) uuid heartbeats
-            lift $ modifyTVar' epoch (+1)
-            logger $ green $ "New heartbeat received from " ++ addrStr
-            return $ HeartbeatResponse i Ok epoch'
+    Heartbeat uuid addrStr asLeader -> do
+      shouldntContinue <- not <$> if asLeader then getQuorum opt st cmd else return True
+      if shouldntContinue
+        then return (Executed i NoQuorum) else do
+        now <- getUnixTime
+        returnAndLog $ atomically $ runWriterT $ do
+          epoch' <- lift $ readTVar epoch
+          lift (M.lookup uuid heartbeats) >>= \case
+            Just cond@ServerCondition{..} ->
+              if isAlive now cond
+                then do -- Normal heartbeat update
+                  lift $ M.insert (cond {lastHeartbeatTime = now}) uuid heartbeats
+                  logger $ green $ "Heartbeat received from " ++ addrStr
+                  return $ HeartbeatResponse i Ok epoch'
+                else do -- Expired server connection
+                  logger $ red $ "Expired heartbeat received from " ++ addrStr
+                  cancelLocksAfterCrash now st
+                  return $ HeartbeatResponse i Forbidden epoch'
+            Nothing -> do -- New server connection
+              lift $ M.insert (ServerCondition now addrStr True) uuid heartbeats
+              lift $ modifyTVar' epoch (+1)
+              logger $ green $ "New heartbeat received from " ++ addrStr
+              return $ HeartbeatResponse i Ok epoch'
     QueryServers -> do
       now <- getUnixTime
       returnAndLog $ atomically $ runWriterT $ do
@@ -104,8 +123,10 @@ runCommand (i, cmd) st@MutState{..} sockAddr =
         epoch' <- lift $ readTVar epoch
         logger $ green "Active servers request"
         return $ QueryServersResponse i epoch' pairs
-    LockGet name cli ->
-      returnAndLog $ atomically $ runWriterT $ do
+    LockGet name cli asLeader -> do
+      shouldntContinue <- not <$> if asLeader then getQuorum opt st cmd else return True
+      if shouldntContinue
+        then return (Executed i NoQuorum) else returnAndLog $ atomically $ runWriterT $ do
         lift $ pushToQueueMap st name cli
         detectDeadlock st
         lift (checkLockMap st name) >>= \case
@@ -118,8 +139,10 @@ runCommand (i, cmd) st@MutState{..} sockAddr =
             else do
               logger $ red $ "Get lock failed for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
               return $ Executed i Retry
-    LockRelease name cli ->
-      returnAndLog $ atomically $ runWriterT $
+    LockRelease name cli asLeader -> do
+      shouldntContinue <- not <$> if asLeader then getQuorum opt st cmd else return True
+      if shouldntContinue
+        then return (Executed i NoQuorum) else returnAndLog $ atomically $ runWriterT $
         lift (checkLockMap st name) >>= \case
           Just (x, xs) ->
             if cli == x
@@ -133,17 +156,110 @@ runCommand (i, cmd) st@MutState{..} sockAddr =
           Nothing -> do
             logger $ green $ "Release nonexistent lock for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
             return $ Executed i Ok
+    ConsensusPrepare propNum propCmd ->
+      returnAndLog $ atomically $ runWriterT $ do
+        logs <- lift $ readTVar log
+        let logLength = length logs
+        case propNum `compare` logLength of
+          LT -> do
+            logger $ yellow "The replica is ahead"
+            let missingLogs = take (logLength - propNum) logs
+            return $ ConsensusReplicaAheadResponse i missingLogs
+          _ -> -- The leader is ahead or replica is up to date
+            lift (readTVar prepared) >>= \case
+              Just (promisedPropNum, cmd) ->
+                if promisedPropNum <= propNum
+                  then do
+                    lift $ writeTVar prepared $ Just (propNum, propCmd)
+                    return $ ConsensusPrepareResponse i Ok (propNum - logLength)
+                  else return $ ConsensusPrepareResponse i Forbidden 0
+              Nothing -> return $ ConsensusPrepareResponse i Ok (propNum - logLength)
+    ConsensusAccept propNum missingLogs -> do
+      logs <- atomically $ readTVar log
+      let logLength = length logs
+      let toAppend = take (propNum - logLength) missingLogs
+      replayCommands opt st (zip [1..] (reverse missingLogs))
+      atomically $ modifyTVar log (missingLogs ++)
+      return $ Executed i Ok
+    ConsensusReject propNum ->
+      atomically (readTVar prepared) >>= \case
+        Nothing -> return $ Executed i NotFound
+        Just (existing, cmd) -> if propNum == existing
+          then do
+            atomically $ writeTVar prepared Nothing
+            return $ Executed i Ok
+          else return $ Executed i Forbidden
+
+replayCommands :: Options -> MutState -> [(Int, ViewLeaderCommand)] -> IO ()
+replayCommands opt st = mapM_ (runCommand opt st)
+
+getQuorum :: Options -> MutState -> ViewLeaderCommand -> IO Bool
+getQuorum opt@Options{..} st@MutState{..} cmd = do
+  logs <- readTVarIO log
+  let propNum = length logs
+  res <- forM viewAddrs $ \viewAddr -> if (viewAddr == currentAddr) then return Nothing else
+    getResponse opt st cmd [viewAddr] >>= \case
+      Left err -> do
+        putStrLn $ red $ "Consensus: Couldn't connect " ++ viewAddr ++ " because " ++ show err
+        return Nothing
+      Right (ConsensusPrepareResponse _ Forbidden _) -> do
+        putStrLn $ red $ "Consensus: Couldn't get promise from " ++ viewAddr
+        return Nothing
+      Right (ConsensusPrepareResponse i Ok missing) ->
+        return $ Just (viewAddr, missing)
+      Right (ConsensusReplicaAheadResponse i missingLogs) -> do
+        replayCommands opt st (zip [1..] (reverse missingLogs))
+        atomically $ modifyTVar log (missingLogs ++)
+        return $ Just (viewAddr, 0)
+      Right _ -> do
+        putStrLn $ red $ "Consensus: Irrelevant response from " ++ viewAddr
+        return Nothing
+  let positiveRes = filter isJust res
+  let isQuorum = (length positiveRes) > (div (length viewAddrs) 2) -- if majority are positive
+  if isQuorum
+    then forM res $ \case -- Send accept message
+        Nothing -> return ()
+        Just (viewAddr, missing) -> do
+          let missingLogs = take missing logs
+          void $ getResponse opt st (ConsensusAccept propNum missingLogs) [viewAddr]
+    else forM res $ \case -- Send reject message
+        Nothing -> return ()
+        Just (viewAddr, _) ->
+          void $ getResponse opt st (ConsensusReject propNum) [viewAddr]
+  return isQuorum
+
+getResponse :: Options
+            -> MutState
+            -> ViewLeaderCommand -- ^ The command to send. Changes the default values for host and port.
+            -> [AddrString]
+            -> IO (Either RequestError Response)
+getResponse opt@Options{..} st@MutState{..} c addrs = do
+    i <- atomically $ readTVar nextRequestId
+    atomically $ modifyTVar' nextRequestId (+1)
+    findAndConnectOpenAddr addrs >>= \case
+      Nothing -> return $ Left $ CouldNotConnect addrs
+      Just (sock, sockAddr) -> do
+        either <- timeoutAct
+          (sendWithLen sock $ S.encode (i, c))
+          (return $ Left SendingTimeout) $ \() ->
+            timeoutAct (recvWithLen sock) (return $ Left ReceivingTimeout) $ \r ->
+              case JSON.decode (BL.fromStrict r) :: Maybe Response of
+                Just res -> return $ Right res
+                _ -> return $ Left InvalidResponse
+        close sock
+        return either
+
 
 -- | Receives messages, decodes and runs the content if necessary, and returns
 -- the response. Should be run after you accepted a connection.
-runConn :: (Socket, SockAddr) -> MutState -> IO ()
-runConn (sock, sockAddr) st = do
+runConn :: (Socket, SockAddr) -> Options -> MutState -> IO ()
+runConn (sock, sockAddr) opt st = do
   timeoutAct (recvWithLen sock) (putStrLn $ red "Timeout when receiving") $
     \cmdMsg -> case S.decode cmdMsg :: Either String (Int, ViewLeaderCommand) of
       Left e ->
         putStrLn $ red "Couldn't parse the message received because " ++ e
       Right (i, cmd) -> do
-        response <- runCommand (i, cmd) st sockAddr
+        response <- runCommand opt st (i, cmd)
         timeoutAct (sendWithLen sock (BL.toStrict (JSON.encode response)))
                    (putStrLn $ red "Timeout when sending")
                    return
@@ -151,11 +267,11 @@ runConn (sock, sockAddr) st = do
 
 -- | The main loop that keeps accepting more connections.
 -- Should be revised for concurrency.
-loop :: Socket -> MutState -> IO ()
-loop sock st = do
+loop :: Socket -> Options -> MutState -> IO ()
+loop sock opt st = do
   conn <- accept sock
-  forkIO (runConn conn st)
-  loop sock st
+  forkIO (runConn conn opt st)
+  loop sock opt st
 
 -- Lock abstractions {{{
 
@@ -261,13 +377,37 @@ detectDeadlock st@MutState{..} = do
 
 -- }}} End of lock abstractions
 
-main :: IO ()
-main = do
+run :: Options -> IO ()
+run opt@Options{..} = do
     attempt <- findAndListenOpenPort $ map show [39000..39010]
     case attempt of
       Nothing -> die $ bgRed "Couldn't bind ports 39000 to 39010"
       Just (sock, sockAddr) -> do
+        let addrStr = show sockAddr
+        unless (addrStr `elem` viewAddrs) $
+          putStrLn $ red $ "Address error: " ++ addrStr
+                        ++ " is not in the list of defined views: " ++ show viewAddrs
         st <- initialState
         setInterval (cancelLocksAfterCrashIO st >> pure True) 5000000 -- every 5 sec
-        loop sock st
+        hostName <- getHostName
+        let opt' = opt {currentAddr = hostName ++ ":" ++ snd (addrStringPair addrStr)}
+        loop sock opt' st
         close sock
+
+-- | Parser for the optional parameters of the client.
+optionsParser :: Parser Options
+optionsParser = Options
+  <$> A.many (A.strOption
+      ( A.long "viewleader"
+     <> A.short 'l'
+     <> A.metavar "VIEWLEADERADDR"
+     <> A.help "One address of a view replica to connect"))
+  <*> pure "" -- This has to be replaced in the run function.
+
+main :: IO ()
+main = A.execParser opts >>= run
+  where
+    opts = A.info (A.helper <*> optionsParser)
+      ( A.fullDesc
+     <> A.progDesc "Start the server"
+     <> A.header "client for an RPC implementation with locks and a view leader" )

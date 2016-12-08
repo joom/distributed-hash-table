@@ -2,6 +2,7 @@
 
 module Client where
 
+import Control.Arrow
 import Control.Concurrent (threadDelay)
 import Control.Monad
 import Control.Monad.STM
@@ -31,8 +32,8 @@ data MutState = MutState
   { nextRequestId :: TVar Int
   }
 
-initialState :: IO MutState
-initialState = MutState <$> newTVarIO 0
+initialState :: Options -> IO MutState
+initialState Options{..} = MutState <$> newTVarIO 0
 
 data CommandTypes =
     ServerCmd ServerCommand
@@ -40,26 +41,27 @@ data CommandTypes =
   deriving (Show)
 
 data Options = Options
-  { serverAddr     :: HostName
-  , viewLeaderAddr :: HostName
-  , cmd            :: CommandTypes
+  { serverAddr :: AddrString
+  , viewAddrs  :: [AddrString]
+  , cmd        :: CommandTypes
   } deriving (Show)
+
+sortedView :: Options -> [AddrString]
+sortedView Options{..} = sortBy (flip compare) viewAddrs
 
 getResponse :: Options
             -> MutState
             -> CommandTypes -- ^ The command to send. Changes the default values for host and port.
-            -> Maybe HostName -- ^ The host to try to connect, overrides default if it is 'Just'.
-            -> Maybe [ServiceName] -- ^ The ports to try to connect, overrides default if it is 'Just'.
+            -> Maybe [AddrString]
             -> IO (Either RequestError Response)
-getResponse opt@Options{..} st@MutState{..} cmd' host ports = do
+getResponse opt@Options{..} st@MutState{..} cmd' addrs = do
     i <- atomically $ readTVar nextRequestId
     atomically $ modifyTVar' nextRequestId (+1)
-    let commandPorts = pick (fromMaybe (map show [38000..38010]) ports) (map show [39000..39010])
-    let addr         = fromMaybe (pick serverAddr viewLeaderAddr) host
     let encoded      = pick' (\c -> S.encode (i, c)) (\c -> S.encode (i, c))
-    attempt <- findAndConnectOpenPort addr commandPorts
-    case attempt of
-      Nothing -> return $ Left $ CouldNotConnect commandPorts
+    let defServers   = map ((serverAddr ++) . (':' :) . show) [38000..38010]
+    let commandAddrs = pick (fromMaybe defServers addrs) (sortedView opt)
+    findAndConnectOpenAddr commandAddrs >>= \case
+      Nothing -> return $ Left $ CouldNotConnect commandAddrs
       Just (sock, sockAddr) -> do
         either <- timeoutAct
           (sendWithLen sock encoded)
@@ -76,7 +78,7 @@ getResponse opt@Options{..} st@MutState{..} cmd' host ports = do
 
 getServers :: Options -> MutState -> IO (Maybe (Int, [(UUIDString, String)]))
 getServers opt@Options{..} st@MutState{..} = do
-  res <- getResponse opt st (ViewCmd QueryServers) Nothing Nothing
+  res <- getResponse opt st (ViewCmd QueryServers) Nothing
   case res of
     Left err -> do
       putStrLn $ bgRed $ show err
@@ -102,8 +104,7 @@ run opt@Options{..} st@MutState{..} =
             case success of
               Just _ -> return success -- we already got it successfully
               Nothing -> do
-                let (host, port) = addrStringPair addr
-                getResponse opt st (ServerCmd $ c {epochInput = viewEpoch}) (Just host) (Just [port]) >>= \case
+                getResponse opt st (ServerCmd $ c {epochInput = viewEpoch}) (Just [addr]) >>= \case
                   Left _ -> return Nothing
                   Right res@(GetResponse _ Ok _) ->
                     return $ Just res
@@ -118,16 +119,14 @@ run opt@Options{..} st@MutState{..} =
         Just (viewEpoch, servers) -> do -- Two phase commit
           let buckets = bucketAllocator k servers fst
           responsesM <- forM buckets $ \(uuidStr, addrStr) -> do
-            let (host, port) = addrStringPair addrStr
-            getResponse opt st (ServerCmd $ c {epochInput = viewEpoch}) (Just host) (Just [port]) -- Phase one request
+            getResponse opt st (ServerCmd $ c {epochInput = viewEpoch}) (Just [addrStr])  -- Phase one request
           let validResponses = rights responsesM
           if all isRight responsesM && all ((== Ok) . status) validResponses
           then do -- Finalize commit
             acknowledgmentsM <- forM (zip buckets validResponses) $ \((uuidStr, addrStr), res) ->
               case res of
                 SetResponseR i Ok ep commitId -> do
-                  let (host, port) = addrStringPair addrStr
-                  getResponse opt st (ServerCmd (SetRCommit k commitId)) (Just host) (Just [port]) >>= \case
+                  getResponse opt st (ServerCmd (SetRCommit k commitId)) (Just [addrStr]) >>= \case
                     Right res@(Executed _ Ok) -> do
                       putStrLn $ green $ "Successfully finalized commit " ++ show commitId
                                  ++ " for the key \"" ++ k ++ "\" on " ++ addrStr
@@ -155,8 +154,7 @@ run opt@Options{..} st@MutState{..} =
             cancelAll <- forM bucketsToCancel $ \((uuidStr, addrStr), res) ->
               case res of
                 Right (SetResponseR i Ok ep commitId) -> do
-                  let (host, port) = addrStringPair addrStr
-                  getResponse opt st (ServerCmd (SetRCancel k commitId)) (Just host) (Just [port]) >>= \case
+                  getResponse opt st (ServerCmd (SetRCancel k commitId)) (Just [addrStr]) >>= \case
                     Right (Executed _ Ok) ->
                       putStrLn $ yellow $ "Successfully cancelled commit " ++ show commitId
                                  ++ " for the key \"" ++ k ++ "\" on " ++ addrStr
@@ -171,8 +169,7 @@ run opt@Options{..} st@MutState{..} =
         Nothing -> die $ bgRed "Couldn't get active servers from view leader"
         Just (viewEpoch, servers) -> do
           keysLists <- forM servers $ \server@(uuidString, addrStr) -> do
-            let (host, port) = addrStringPair addrStr
-            getResponse opt st cmd (Just host) (Just [port]) >>= \case
+            getResponse opt st cmd (Just [addrStr]) >>= \case
               Left err -> do
                 putStrLn $ red "Failed to get keys from the server " ++ addrStr ++ " because of " ++ show err
                 return []
@@ -184,7 +181,7 @@ run opt@Options{..} st@MutState{..} =
           print allKeys
     ServerCmd _ -> error $ bgRed "Unimplemented on purpose"
     ViewCmd _ ->
-      getResponse opt st cmd Nothing Nothing >>= \case
+      getResponse opt st cmd Nothing >>= \case
         Left err -> die $ bgRed "View leader command failed because of " ++ show err
         Right c@(Executed _ Retry) -> do
           print c
@@ -222,14 +219,16 @@ commandParser = A.subparser $
         (ViewCmd <$>
           (LockGet
             <$> A.strArgument (A.metavar "NAME" <> A.help "Lock name")
-            <*> A.strArgument (A.metavar "ID" <> A.help "Requester ID.")))
+            <*> A.strArgument (A.metavar "ID" <> A.help "Requester ID.")
+            <*> pure True))
         (A.progDesc "Get a lock from the view leader."))
   <> A.command "lock_release"
       (A.info
         (ViewCmd <$>
           (LockRelease
             <$> A.strArgument (A.metavar "NAME" <> A.help "Lock name")
-            <*> A.strArgument (A.metavar "ID" <> A.help "Requester ID.")))
+            <*> A.strArgument (A.metavar "ID" <> A.help "Requester ID.")
+            <*> pure True))
         (A.progDesc "Release a lock from the view leader."))
 
 -- | Parser for the optional parameters of the client.
@@ -241,18 +240,20 @@ optionsParser = Options
      <> A.metavar "SERVERADDR"
      <> A.help "Address of the server to connect"
      <> A.value "localhost" )
-  <*> A.strOption
+  <*> A.many (A.strOption
       ( A.long "viewleader"
      <> A.short 'l'
      <> A.metavar "VIEWLEADERADDR"
-     <> A.help "Address of the view leader to connect"
-     <> A.value "localhost" )
+     <> A.help "One address of a view replica to connect"))
   <*> commandParser
 
 main :: IO ()
 main = do
-    st <- initialState
-    opt <- A.execParser opts
+    optUser@Options{..} <- A.execParser opts
+    defViews <- defaultViews
+    let newViews = if null viewAddrs then defViews else viewAddrs
+    let opt = optUser {viewAddrs = newViews}
+    st <- initialState opt
     run opt st
   where
     opts = A.info (A.helper <*> optionsParser)
