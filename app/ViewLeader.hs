@@ -383,14 +383,17 @@ run opt@Options{..} = do
     case attempt of
       Nothing -> die $ bgRed "Couldn't bind ports 39000 to 39010"
       Just (sock, sockAddr) -> do
+        hostName <- getHostName
         let addrStr = show sockAddr
-        unless (addrStr `elem` viewAddrs) $
-          putStrLn $ red $ "Address error: " ++ addrStr
-                        ++ " is not in the list of defined views: " ++ show viewAddrs
+        let myAddr = hostName ++ ":" ++ snd (addrStringPair addrStr)
+        defViews <- defaultViews
+        let newViews = if null viewAddrs then defViews else viewAddrs
+        let opt' = opt {currentAddr = myAddr, viewAddrs = newViews}
+        unless (myAddr `elem` newViews) $
+          putStrLn $ red $ "Address error: " ++ myAddr
+                        ++ " is not in the list of defined views: " ++ show newViews
         st <- initialState
         setInterval (cancelLocksAfterCrashIO st >> pure True) 5000000 -- every 5 sec
-        hostName <- getHostName
-        let opt' = opt {currentAddr = hostName ++ ":" ++ snd (addrStringPair addrStr)}
         loop sock opt' st
         close sock
 
