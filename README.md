@@ -1,10 +1,12 @@
 # distributed-hash-table
 
-An implementation of distributed hash tables with distributed two-phase commit.
+A Haskell implementation of distributed hash tables with distributed two-phase commit.
 The views can hold locks, and have replicas that they always communicate with to achieve quorum-based consensus.
 
 Written as a project for COMP 360 Distributed Systems, Fall 2016, Prof. Jeff
 Epstein, Wesleyan University.
+
+![Diagram](http://i.imgur.com/Ao8MzVQ.png)
 
 ## Installation
 
