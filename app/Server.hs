@@ -181,8 +181,10 @@ sendHeartbeat opt@Options{..} st@MutState{..} addrStr = do
           oldEpoch <- atomically $ swapTVar epoch newEpoch
           when (oldEpoch /= newEpoch) $ updateActiveServers opt st
           putStrLn "Heartbeat sent"
-        Just _ -> do
-          putStrLn $ bgRed "Heartbeat: View leader rejects the server ID"
+        Just (HeartbeatResponse _ NoQuorum _) ->
+          putStrLn $ red "Heartbeat sent but rejected since there is no quorum"
+        Just x -> do
+          putStrLn $ bgRed "Heartbeat: View leader rejects the server ID: " ++ show x
           exitFailure
         Nothing -> do
           putStrLn $ bgRed "Couldn't parse heartbeat response"
@@ -314,7 +316,9 @@ run :: Options -> IO ()
 run optUser@Options{..} = do
     -- Finish setting up the options
     uuidStr <- newUUID
-    let opt = optUser {uuid = uuidStr}
+    defViews <- defaultViews
+    let newViews = if null viewAddrs then defViews else viewAddrs
+    let opt = optUser {uuid = uuidStr, viewAddrs = newViews}
     -- Options finished. Now do the actual work.
     attempt <- findAndListenOpenPort $ map show [38000..38010]
     case attempt of

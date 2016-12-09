@@ -94,12 +94,13 @@ runCommand :: Options
 runCommand opt@Options{..} st@MutState{..} (i, cmd) =
   case cmd of
     Heartbeat uuid addrStr asLeader -> do
-      shouldntContinue <- not <$> if asLeader then getQuorum opt st cmd else return True
+      epoch' <- readTVarIO epoch
+      let cmd' = Heartbeat uuid addrStr False
+      shouldntContinue <- not <$> if asLeader then getQuorum opt st cmd' else return True
       if shouldntContinue
-        then return (Executed i NoQuorum) else do
+        then return (HeartbeatResponse i NoQuorum epoch') else do
         now <- getUnixTime
         returnAndLog $ atomically $ runWriterT $ do
-          epoch' <- lift $ readTVar epoch
           lift (M.lookup uuid heartbeats) >>= \case
             Just cond@ServerCondition{..} ->
               if isAlive now cond
@@ -109,7 +110,7 @@ runCommand opt@Options{..} st@MutState{..} (i, cmd) =
                   return $ HeartbeatResponse i Ok epoch'
                 else do -- Expired server connection
                   logger $ red $ "Expired heartbeat received from " ++ addrStr
-                  cancelLocksAfterCrash now st
+                  -- cancelLocksAfterCrash now st
                   return $ HeartbeatResponse i Forbidden epoch'
             Nothing -> do -- New server connection
               lift $ M.insert (ServerCondition now addrStr True) uuid heartbeats
@@ -124,7 +125,8 @@ runCommand opt@Options{..} st@MutState{..} (i, cmd) =
         logger $ green "Active servers request"
         return $ QueryServersResponse i epoch' pairs
     LockGet name cli asLeader -> do
-      shouldntContinue <- not <$> if asLeader then getQuorum opt st cmd else return True
+      let cmd' = LockGet name cli False
+      shouldntContinue <- not <$> if asLeader then getQuorum opt st cmd' else return True
       if shouldntContinue
         then return (Executed i NoQuorum) else returnAndLog $ atomically $ runWriterT $ do
         lift $ pushToQueueMap st name cli
@@ -140,7 +142,8 @@ runCommand opt@Options{..} st@MutState{..} (i, cmd) =
               logger $ red $ "Get lock failed for \"" ++ name ++ "\" from \"" ++ cli ++ "\""
               return $ Executed i Retry
     LockRelease name cli asLeader -> do
-      shouldntContinue <- not <$> if asLeader then getQuorum opt st cmd else return True
+      let cmd' = LockRelease name cli False
+      shouldntContinue <- not <$> if asLeader then getQuorum opt st cmd' else return True
       if shouldntContinue
         then return (Executed i NoQuorum) else returnAndLog $ atomically $ runWriterT $
         lift (checkLockMap st name) >>= \case
@@ -170,17 +173,29 @@ runCommand opt@Options{..} st@MutState{..} (i, cmd) =
               Just (promisedPropNum, cmd) ->
                 if promisedPropNum <= propNum
                   then do
+                    logger $ yellow $ "Consensus: Prepared for " ++ show propNum
                     lift $ writeTVar prepared $ Just (propNum, propCmd)
                     return $ ConsensusPrepareResponse i Ok (propNum - logLength)
                   else return $ ConsensusPrepareResponse i Forbidden 0
-              Nothing -> return $ ConsensusPrepareResponse i Ok (propNum - logLength)
+              Nothing -> do
+                lift $ writeTVar prepared $ Just (propNum, propCmd)
+                return $ ConsensusPrepareResponse i Ok (propNum - logLength)
     ConsensusAccept propNum missingLogs -> do
-      logs <- atomically $ readTVar log
-      let logLength = length logs
-      let toAppend = take (propNum - logLength) missingLogs
-      replayCommands opt st (zip [1..] (reverse missingLogs))
-      atomically $ modifyTVar log (missingLogs ++)
-      return $ Executed i Ok
+      logs <- readTVarIO log
+      readTVarIO prepared >>= \case
+        Just (promisedPropNum, promisedCmd) -> do
+          let logLength = length logs
+          let toAppend = promisedCmd : take (propNum - logLength) missingLogs
+          replayCommands opt st (zip [1..] (reverse toAppend))
+          atomically $ modifyTVar' log (toAppend ++)
+          putStrLn $ yellow $ "Consensus: Accepting proposal " ++ show propNum
+                  ++ " by running " ++ show (length toAppend) ++ " command(s)"
+          putStrLn $ cyan $ show toAppend
+          when (propNum == promisedPropNum) $ atomically $ writeTVar prepared Nothing
+          return $ Executed i Ok
+        Nothing -> do
+          putStrLn $ yellow $ "Consensus: There is no promise for " ++ show propNum
+          return $ Executed i Ok
     ConsensusReject propNum ->
       atomically (readTVar prepared) >>= \case
         Nothing -> return $ Executed i NotFound
@@ -198,7 +213,7 @@ getQuorum opt@Options{..} st@MutState{..} cmd = do
   logs <- readTVarIO log
   let propNum = length logs
   res <- forM viewAddrs $ \viewAddr -> if (viewAddr == currentAddr) then return Nothing else
-    getResponse opt st cmd [viewAddr] >>= \case
+    getResponse opt st (ConsensusPrepare propNum cmd) [viewAddr] >>= \case
       Left err -> do
         putStrLn $ red $ "Consensus: Couldn't connect " ++ viewAddr ++ " because " ++ show err
         return Nothing
@@ -209,13 +224,13 @@ getQuorum opt@Options{..} st@MutState{..} cmd = do
         return $ Just (viewAddr, missing)
       Right (ConsensusReplicaAheadResponse i missingLogs) -> do
         replayCommands opt st (zip [1..] (reverse missingLogs))
-        atomically $ modifyTVar log (missingLogs ++)
+        atomically $ modifyTVar' log (missingLogs ++)
         return $ Just (viewAddr, 0)
-      Right _ -> do
-        putStrLn $ red $ "Consensus: Irrelevant response from " ++ viewAddr
+      Right x -> do
+        putStrLn $ red $ "Consensus: Irrelevant response from " ++ viewAddr ++ ", such as " ++ show x
         return Nothing
   let positiveRes = filter isJust res
-  let isQuorum = (length positiveRes) > (div (length viewAddrs) 2) -- if majority are positive
+  let isQuorum = (length positiveRes + 1) > (div (length viewAddrs) 2) -- if majority are positive
   if isQuorum
     then forM res $ \case -- Send accept message
         Nothing -> return ()
@@ -226,6 +241,7 @@ getQuorum opt@Options{..} st@MutState{..} cmd = do
         Nothing -> return ()
         Just (viewAddr, _) ->
           void $ getResponse opt st (ConsensusReject propNum) [viewAddr]
+  when isQuorum $ atomically $ modifyTVar' log (cmd :)
   return isQuorum
 
 getResponse :: Options
@@ -234,7 +250,7 @@ getResponse :: Options
             -> [AddrString]
             -> IO (Either RequestError Response)
 getResponse opt@Options{..} st@MutState{..} c addrs = do
-    i <- atomically $ readTVar nextRequestId
+    i <- readTVarIO nextRequestId
     atomically $ modifyTVar' nextRequestId (+1)
     findAndConnectOpenAddr addrs >>= \case
       Nothing -> return $ Left $ CouldNotConnect addrs
@@ -393,7 +409,7 @@ run opt@Options{..} = do
           putStrLn $ red $ "Address error: " ++ myAddr
                         ++ " is not in the list of defined views: " ++ show newViews
         st <- initialState
-        setInterval (cancelLocksAfterCrashIO st >> pure True) 5000000 -- every 5 sec
+        -- setInterval (cancelLocksAfterCrashIO st >> pure True) 5000000 -- every 5 sec
         loop sock opt' st
         close sock
 
