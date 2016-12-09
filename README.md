@@ -1,9 +1,9 @@
-# rpc
+# distributed-hash-table
 
 An implementation of distributed hash tables with distributed two-phase commit.
-The view leader can hold locks.
+The views can hold locks, and have replicas that they always communicate with to achieve quorum-based consensus.
 
-Written as a project for COMP360 Distributed Systems, Fall 2016, Prof. Jeff
+Written as a project for COMP 360 Distributed Systems, Fall 2016, Prof. Jeff
 Epstein, Wesleyan University.
 
 ## Installation
@@ -11,27 +11,35 @@ Epstein, Wesleyan University.
 Make sure you have [Stack](http://haskellstack.org) installed.
 
 Clone the repository and run `stack install`. The executable files
-`rpc-client`, `rpc-server`, `rpc-view-leader` must now be `~/.local/bin`, which
+`dht-client`, `dht-server`, `dht-view-leader` must now be `~/.local/bin`, which
 is probably in your path variable.
 
 ## Usage
 
-You can run the server without any command line arguments: `rpc-server`.
+You can run the server without any command line arguments: `dht-server`.
 
-For `rpc-client` and `rpc-view-leader`, you can see all the options using the `--help` flag.
+For `dht-client` and `dht-view-leader`, you can see all the options using the `--help` flag.
 
-The executable  `rpc-client` take optional arguments `--server` (or `-s`) and
+The executable  `dht-client` take optional arguments `--server` (or `-s`) and
 `--viewleader` (or `-l`) that specifies which host to connect , such a call
 would be of the form
 
 ```
-rpc-client --server 127.0.0.1 setr "lang" "Türkçe"
+dht-client --server 127.0.0.1 setr "lang" "Türkçe"
 ```
 
-The executable `rpc-server` also takes the `--viewleader` optional argument, to
+The executable `dht-server` also takes the `--viewleader` optional argument, to
 be able to perform heartbeats.
 
-If the optional argument isn't provided, it is assumed to be "localhost".
+If the optional argument `--server` isn't provided, it is assumed to be the local computer name.
+
+The optional argument `--viewleader` (or with its short form `-l`) can be passed multiple times for each view replica, such as:
+
+```
+dht-view-leader -l mycomputer:39000 -l mycomputer:39001 -l mycomputer:39002 -l mycomputer:39003 -l mycomputer:39004
+```
+
+If the optional argument `--viewleader` isn't provided, it is assumed that there are 3 default inputs: your computer name with the ports 39000, 39001 and 39002.
 
 ### Timeouts
 
@@ -44,6 +52,7 @@ it will be told by the view leader that it expired. In that case, the server
 terminates.
 
 ### Locks and deadlock detection
+
 
 When there is a request for a lock that receives the retry message, that client
 is added to the queue for that lock. Even though the client stops asking, it will
@@ -62,6 +71,8 @@ repeatedly logs the same deadlock information as long as it keeps getting the
 request. Since the client keeps retrying by default, it will not stop logging
 the deadlock unless the client is stopped. If a requester ID is used for
 multiple lock requests at the same time, this can cause some weird behavior.
+
+*Deadlock detection is currently deactivated, will be reactivated after refactoring for consensus.*
 
 ### Bucket allocator
 

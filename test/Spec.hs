@@ -1,7 +1,7 @@
 import Test.Hspec
 import Test.QuickCheck
 
-import RPC
+import DHT
 
 propIntBytesRead :: Int -> Int -> Bool
 propIntBytesRead i j = i' == n

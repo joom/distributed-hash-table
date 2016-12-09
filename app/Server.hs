@@ -30,8 +30,8 @@ import System.Exit
 import qualified Options.Applicative as A
 import Options.Applicative (Parser, (<>))
 
-import RPC
-import RPC.Socket
+import DHT
+import DHT.Socket
 
 data Options = Options
   { viewAddrs :: [AddrString]
@@ -347,4 +347,4 @@ main = A.execParser opts >>= run
     opts = A.info (A.helper <*> optionsParser)
       ( A.fullDesc
      <> A.progDesc "Start the server"
-     <> A.header "client for an RPC implementation with locks and a view leader" )
+     <> A.header "client for an DHT implementation with locks and a view leader" )

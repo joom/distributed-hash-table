@@ -32,8 +32,8 @@ import System.Exit
 import qualified Options.Applicative as A
 import Options.Applicative (Parser, (<>))
 
-import RPC
-import RPC.Socket
+import DHT
+import DHT.Socket
 
 data Options = Options
   { viewAddrs   :: [AddrString]
@@ -110,7 +110,6 @@ runCommand opt@Options{..} st@MutState{..} (i, cmd) =
                   return $ HeartbeatResponse i Ok epoch'
                 else do -- Expired server connection
                   logger $ red $ "Expired heartbeat received from " ++ addrStr
-                  -- cancelLocksAfterCrash now st
                   return $ HeartbeatResponse i Forbidden epoch'
             Nothing -> do -- New server connection
               lift $ M.insert (ServerCondition now addrStr True) uuid heartbeats
@@ -327,37 +326,38 @@ popFromQueueMap MutState{..} k =
           _ -> M.insert xs k lockMap
         return $ Just x
 
--- | Goes through all the servers that expired, but not yet marked inactive.
--- For each of them, it looks for locks held by those servers, releases them.
--- Then marks that server inactive.
-cancelLocksAfterCrash :: UnixTime -- ^ Function call time, i.e. now
-                      -> MutState
-                      -> Logger STM ()
-cancelLocksAfterCrash now st@MutState{..} = do
-    hbList <- lift $ filter (\(_, c) -> isActive c && not (isAlive now c))
-                   <$> ListT.toList (M.stream heartbeats)
-    lockList <- lift $ lockHolders st
-    forM_ hbList (\(uuid, cond@ServerCondition{..}) -> do
-      let portName = dropWhile (/= ':') addrString -- will get something like ":38000"
-      let lockNamesToDelete = map snd $ filter (\(reqId, _) -> reqId == portName) lockList
-      unless (null lockNamesToDelete) $ do -- Remove locks
-        logger $ red $ "Removing locks taken by inactive servers: "
-                    ++ intercalate ", " lockNamesToDelete
-        lift $ forM_ lockNamesToDelete $ \name ->
-          M.delete name lockMap
-      lift $ do -- Mark inactive
-        modifyTVar' epoch (+1)
-        M.insert (cond {isActive = False}) uuid heartbeats)
+-- -- | Goes through all the servers that expired, but not yet marked inactive.
+-- -- For each of them, it looks for locks held by those servers, releases them.
+-- -- Then marks that server inactive.
+-- cancelLocksAfterCrash :: UnixTime -- ^ Function call time, i.e. now
+--                       -> Options
+--                       -> MutState
+--                       -> Logger STM ()
+-- cancelLocksAfterCrash now opt@Options{..} st@MutState{..} = do
+--     hbList <- lift $ filter (\(_, c) -> isActive c && not (isAlive now c))
+--                    <$> ListT.toList (M.stream heartbeats)
+--     lockList <- lift $ lockHolders st
+--     forM_ hbList (\(uuid, cond@ServerCondition{..}) -> do
+--       let portName = dropWhile (/= ':') addrString -- will get something like ":38000"
+--       let lockNamesToDelete = map snd $ filter (\(reqId, _) -> reqId == portName) lockList
+--       unless (null lockNamesToDelete) $ do -- Remove locks
+--         logger $ red $ "Removing locks taken by inactive servers: "
+--                     ++ intercalate ", " lockNamesToDelete
+--         lift $ forM_ lockNamesToDelete $ \name ->
+--           M.delete name lockMap
+--       lift $ do -- Mark inactive
+--         modifyTVar' epoch (+1)
+--         M.insert (cond {isActive = False}) uuid heartbeats)
 
--- | An IO function to call regularly to remove locks held by servers that
--- completely stopped sending heartbeats. If a server sends a heartbeat after
--- it expires, the heartbeat will be seen as an "expired heartbeat", but
--- if a server stops altogether, we have to be able to detect that in time and
--- cancel necessary locks.
-cancelLocksAfterCrashIO :: MutState -> IO ()
-cancelLocksAfterCrashIO st = do
-  now <- getUnixTime
-  returnAndLog $ atomically $ runWriterT $ cancelLocksAfterCrash now st
+-- -- | An IO function to call regularly to remove locks held by servers that
+-- -- completely stopped sending heartbeats. If a server sends a heartbeat after
+-- -- it expires, the heartbeat will be seen as an "expired heartbeat", but
+-- -- if a server stops altogether, we have to be able to detect that in time and
+-- -- cancel necessary locks.
+-- cancelLocksAfterCrashIO :: MutState -> IO ()
+-- cancelLocksAfterCrashIO opt st = do
+--   now <- getUnixTime
+--   returnAndLog $ atomically $ runWriterT $ cancelLocksAfterCrash now opt st
 
 -- | An association list of keys to the requesters waiting for that key.
 waitedLocks :: MutState -> STM [(String, [String])]
@@ -409,7 +409,6 @@ run opt@Options{..} = do
           putStrLn $ red $ "Address error: " ++ myAddr
                         ++ " is not in the list of defined views: " ++ show newViews
         st <- initialState
-        -- setInterval (cancelLocksAfterCrashIO st >> pure True) 5000000 -- every 5 sec
         loop sock opt' st
         close sock
 
@@ -429,4 +428,4 @@ main = A.execParser opts >>= run
     opts = A.info (A.helper <*> optionsParser)
       ( A.fullDesc
      <> A.progDesc "Start the server"
-     <> A.header "client for an RPC implementation with locks and a view leader" )
+     <> A.header "client for an DHT implementation with locks and a view leader" )

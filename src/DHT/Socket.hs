@@ -1,4 +1,4 @@
-module RPC.Socket where
+module DHT.Socket where
 
 import Network.BSD (getHostName)
 import Network.Socket hiding (recv)
@@ -10,7 +10,7 @@ import Control.Arrow
 import System.Timeout
 import System.Console.Chalk
 
-import RPC
+import DHT
 
 data RequestError =
     CouldNotConnect [AddrString]
@@ -116,7 +116,8 @@ findAndConnectOpenAddr = foldM (\success addr ->
       _ -> do
         let (host, port) = addrStringPair addr
         (sock, sockAddr) <- getClientSocket host port
-        attempt <- timeout 10000000 (try (connect sock sockAddr))
+        -- Short timeout for connecting
+        attempt <- timeout 5000000 (try (connect sock sockAddr))
         case (attempt :: Maybe (Either IOException ())) of
           Nothing -> do
             close sock

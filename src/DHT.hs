@@ -1,5 +1,5 @@
 {-# LANGUAGE DeriveGeneric, OverloadedStrings, LambdaCase #-}
-module RPC where
+module DHT where
 
 import Data.Aeson
 import qualified Data.UUID

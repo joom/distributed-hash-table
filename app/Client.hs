@@ -24,8 +24,8 @@ import System.Console.Chalk
 import System.Timeout
 import System.Exit
 
-import RPC
-import RPC.Socket
+import DHT
+import DHT.Socket
 
 -- | A type for mutable state.
 data MutState = MutState
@@ -259,4 +259,4 @@ main = do
     opts = A.info (A.helper <*> optionsParser)
       ( A.fullDesc
      <> A.progDesc "Connect to the server at HOST with the given command"
-     <> A.header "client for an RPC implementation with locks and a view leader" )
+     <> A.header "client for an DHT implementation with locks and a view leader" )
